@@ -6,15 +6,15 @@ import os
 import re
 from typing import Any, Dict, List, Tuple
 
-from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers import aiohttp_client
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import aiohttp_client, event as ha_event
+from datetime import timedelta
 
 from .const import (
     DOMAIN, CONF_BASE_URL, CONF_DEVICES_JSON, CONF_RULES_TEXT, CONF_ALLOWED_GROUPS, CONF_APPEND_DYNAMIC_RULES,
-    DEFAULT_RULES, DEFAULT_ALLOWED_GROUPS, ALLOWED_CTAGS, CTAG_MAPPING, SAFESEARCH_GROUPS, SAFESEARCH_CTAGS, BLOCKED_SERVICES_PRESETS
+    DEFAULT_RULES, DEFAULT_ALLOWED_GROUPS, CTAG_MAPPING, SAFESEARCH_GROUPS, SAFESEARCH_CTAGS, SAFEBROWSING_GROUPS,
+    SAFEBROWSING_CTAGS, PARENTAL_GROUPS, PARENTAL_CTAGS, BLOCKED_SERVICES_PRESETS
 )
 from .api import AdGuardAPI
 
@@ -73,27 +73,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     session = aiohttp_client.async_get_clientsession(hass)
     base_url = entry.data[CONF_BASE_URL]
-    username = (entry.data.get(CONF_USERNAME) or "").strip()
-    password = (entry.data.get(CONF_PASSWORD) or "").strip()
-    verify_ssl = entry.data.get(CONF_VERIFY_SSL, True)
+    username = (entry.data.get("username") or "").strip()
+    password = (entry.data.get("password") or "").strip()
+    verify_ssl = entry.data.get("verify_ssl", True)
     devices_json = entry.data.get(CONF_DEVICES_JSON)
     rules_text = entry.data.get(CONF_RULES_TEXT) or DEFAULT_RULES
-    allowed_groups = _parse_groups(entry.data.get(CONF_ALLOWED_GROUPS))
-    append_dynamic_rules = bool(entry.data.get(CONF_APPEND_DYNAMIC_RULES, True))
+    allowed_groups = _parse_groups(entry.data.get("allowed_groups"))
+    append_dynamic_rules = bool(entry.data.get("append_dynamic_rules", True))
 
     api = AdGuardAPI(session, base_url, username=username or None, password=password or None, verify_ssl=verify_ssl)
 
     try:
-        status = await api.get_version()
-        _LOGGER.info("Connected to AdGuard Home at %s — status: %s", base_url, status)
+        await api.get_version()
     except Exception as e:
-        _LOGGER.exception("AdGuard Policy Sync: connectivity check failed to %s", base_url)
-        raise ConfigEntryNotReady(f"Cannot reach AdGuard Home at {base_url}: {e}") from e
+        _LOGGER.warning("Cannot reach %s yet: %s (services still registered)", base_url, e)
 
     try:
         catalog = await api.list_blocked_services_catalog()
         valid_slugs = set(catalog.keys())
-        _LOGGER.info("Loaded %d blocked services from AdGuard", len(valid_slugs))
     except Exception as e:
         _LOGGER.warning("Could not load blocked services catalog: %s", e)
         valid_slugs = set()
@@ -102,6 +99,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "api": api, "devices_json": devices_json, "rules_text": rules_text,
         "valid_service_slugs": valid_slugs, "allowed_groups": allowed_groups,
         "append_dynamic_rules": append_dynamic_rules,
+        "_pause_state": {},
     }
 
     async def _service_sync(call: ServiceCall) -> None:
@@ -152,10 +150,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await api.clients_add(client_payload)
             except Exception as e:
                 import logging
-                logging.getLogger(__name__).error("Client push failed for %s: %s | Payload=%s", final_name, e, {k: client_payload[k] for k in ("name","ids","tags","use_global_settings","blocked_services","use_global_blocked_services","safesearch_enabled")})
+                logging.getLogger(__name__).error("Client push failed for %s: %s | Payload=%s", final_name, e, {k: client_payload[k] for k in ("name","ids","tags","use_global_settings","blocked_services","use_global_blocked_services","safesearch_enabled","safebrowsing_enabled","parental_enabled")})
                 continue
 
+    async def _service_pause(call: ServiceCall) -> None:
+        data = hass.data[DOMAIN][entry.entry_id]
+        api: AdGuardAPI = data["api"]
+        minutes = int(call.data.get("minutes", 15))
+        scope = str(call.data.get("scope", "filtering_only")).lower()
+        clients = call.data.get("clients") or []
+
+        if not clients:
+            _LOGGER.error("pause: no clients provided")
+            return
+
+        try:
+            status = await api.clients_status()
+            existing_clients = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
+        except Exception as e:
+            _LOGGER.error("pause: failed to list clients: %s", e)
+            return
+
+        indexed = {c.get("name"): c for c in existing_clients if isinstance(c, dict) and c.get("name")}
+
+        for name in clients:
+            c = indexed.get(name)
+            if not c:
+                _LOGGER.warning("pause: client '%s' not found", name)
+                continue
+
+            prev = {
+                "filtering_enabled": bool(c.get("filtering_enabled", True)),
+                "safebrowsing_enabled": bool(c.get("safebrowsing_enabled", False)),
+                "parental_enabled": bool(c.get("parental_enabled", False)),
+                "use_global_blocked_services": bool(c.get("use_global_blocked_services", True)),
+                "blocked_services": c.get("blocked_services", []),
+            }
+            hass.data[DOMAIN][entry.entry_id]["_pause_state"][name] = prev
+
+            payload = {"filtering_enabled": False}
+            if scope == "all":
+                payload.update({
+                    "safebrowsing_enabled": False,
+                    "parental_enabled": False,
+                    "use_global_blocked_services": False,
+                    "blocked_services": [],
+                })
+            try:
+                await api.clients_update(name, payload)
+            except Exception as e:
+                _LOGGER.error("pause: update failed for '%s': %s", name, e)
+                continue
+
+            async def _restore_cb(now):
+                snap = hass.data[DOMAIN][entry.entry_id]["_pause_state"].pop(name, None)
+                if not snap:
+                    return
+                try:
+                    await api.clients_update(name, snap)
+                except Exception as e:
+                    _LOGGER.error("pause: restore failed for '%s': %s", name, e)
+
+            ha_event.async_call_later(hass, timedelta(minutes=minutes), _restore_cb)
+
     hass.services.async_register(DOMAIN, "sync", _service_sync)
+    hass.services.async_register(DOMAIN, "pause", _service_pause)
 
     if devices_json:
         hass.async_create_task(hass.services.async_call(DOMAIN, "sync", {}, blocking=False))
@@ -164,6 +223,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_remove(DOMAIN, "sync")
+    hass.services.async_remove(DOMAIN, "pause")
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
 
@@ -192,12 +252,7 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
                         allowed_groups: set[str]) -> Tuple[List[Tuple[str, dict, bool]], Dict[str, List[str]]]:
     try:
         status = await api.clients_status()
-        if isinstance(status, dict):
-            existing_clients = status.get("clients") or []
-        elif isinstance(status, list):
-            existing_clients = status
-        else:
-            existing_clients = []
+        existing_clients = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
     except Exception:
         existing_clients = []
 
@@ -242,56 +297,61 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
         should_update = any(idv in existing_ids for idv in ids)
         final_name = desired_name
         if should_update:
-            matched = await api.clients_search(ids)
-            if matched:
-                final_name = matched[0].get("name") or desired_name
+            try:
+                matched = await api.clients_search(ids)
+                if matched:
+                    final_name = matched[0].get("name") or desired_name
+            except Exception:
+                pass
         else:
             final_name = _unique_name(desired_name, ids, existing_names)
 
         for g in groups:
             groups_to_clients.setdefault(g, []).append(final_name)
 
-        safesearch_explicit = bool(d.get("safesearch", False))
-        safesearch = safesearch_explicit or any(g in SAFESEARCH_GROUPS for g in groups) or any(t in {"user_child"} for t in ctags)
+        # Feature flags with overrides
+        safesearch = bool(d.get("safesearch", False)) \
+                     or any(g in SAFESEARCH_GROUPS for g in groups) \
+                     or any(t in SAFESEARCH_CTAGS for t in ctags)
 
-        wanted = [slug for g in groups for slug in BLOCKED_SERVICES_PRESETS.get(g, [])]
-        blocked = sorted({s for s in wanted if not valid_slugs or s in valid_slugs})
+        safebrowsing = (
+            True if d.get("safebrowsing") is True else
+            False if d.get("safebrowsing") is False else
+            (any(g in SAFEBROWSING_GROUPS for g in groups) or any(t in SAFEBROWSING_CTAGS for t in ctags))
+        )
+
+        parental = (
+            True if d.get("parental") is True else
+            False if d.get("parental") is False else
+            (any(g in PARENTAL_GROUPS for g in groups) or any(t in PARENTAL_CTAGS for t in ctags))
+        )
+
+        # Blocked services: per-device override or preset union
+        if "blocked_services" in d:
+            blocked = [s for s in (d.get("blocked_services") or [])]
+            use_global_bs = bool(d.get("use_global_blocked_services", False))
+        else:
+            wanted = [slug for g in groups for slug in BLOCKED_SERVICES_PRESETS.get(g, [])]
+            blocked = sorted(set(wanted))
+            use_global_bs = False
 
         client_payload = {
             "name": final_name,
             "ids": ids,
-            "upstreams": [],
             "use_global_settings": False,
             "filtering_enabled": True,
-            "parental_enabled": False,
-            "safebrowsing_enabled": False,
+            "parental_enabled": bool(parental),
+            "safebrowsing_enabled": bool(safebrowsing),
             "safesearch_enabled": bool(safesearch),
-            "use_global_blocked_services": False,
+            "use_global_blocked_services": use_global_bs,
             "blocked_services": blocked,
         }
         if ctags:
-            client_payload["tags"] = ctags  # only set when non-empty
+            client_payload["tags"] = ctags
 
-        _LOGGER.info("Plan for '%s': from_json_tags=%s -> final_tags=%s safesearch=%s blocked_services=%s",
-                     final_name, d.get("tags", []), ctags, safesearch, blocked)
+        _LOGGER.info("Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
+                     final_name, ctags, safebrowsing, parental, safesearch, blocked, use_global_bs)
 
         plan.append((final_name, client_payload, should_update))
 
     return plan, groups_to_clients
-
-def _fmt_client_union(names: List[str]) -> str:
-    quoted = ["'" + n.replace("'", "\\'") + "'" for n in names]
-    return "|".join(quoted)
-
-def _generate_dynamic_rules(groups_to_clients: Dict[str, List[str]]) -> str:
-    lines = ["! ---- Dynamically generated $client rules ----"]
-    if "child" in groups_to_clients and groups_to_clients["child"]:
-        union = _fmt_client_union(groups_to_clients["child"])
-        for host in ("doh.cloudflare-dns.com","dns.google","dns.quad9.net"):
-            lines.append(f"||{host}^$client={union}")
-    if "media" in groups_to_clients and groups_to_clients["media"]:
-        union = _fmt_client_union(groups_to_clients["media"])
-        for host in ("facebook.com","instagram.com","tiktok.com","discord.com","reddit.com"):
-            lines.append(f"||{host}^$client={union}")
-    lines.append("! ---- End dynamic rules ----")
-    return "\\n".join(lines)

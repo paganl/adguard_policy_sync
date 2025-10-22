@@ -1,6 +1,6 @@
 sync:
   name: Sync policy to AdGuard Home
-  description: Reads a JSON file of devices, applies per-tag client settings, and pushes custom rules to AdGuard Home.
+  description: Generates and applies custom rules, then syncs clients from a devices JSON.
   fields:
     devices_json:
       name: Devices JSON path (optional)
@@ -11,7 +11,37 @@ sync:
         text:
     rules_text:
       name: Custom rules (optional)
-      description: If provided, these rules replace the instance's current custom rules (dynamic rules may still be appended if enabled).
+      description: If provided, replaces the current custom rules (dynamic rules may still be appended if enabled).
       required: false
       selector:
         text:
+
+pause:
+  name: Pause protection for clients
+  description: Temporarily disables protection for selected clients and automatically restores it.
+  fields:
+    clients:
+      name: Client names
+      description: Exact Client names as shown in AdGuard Home.
+      required: true
+      selector:
+        text:
+    minutes:
+      name: Minutes
+      description: Duration of the pause (default 15).
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 240
+          mode: box
+          unit_of_measurement: minutes
+    scope:
+      name: Scope
+      description: 'filtering_only' disables only filtering rules; 'all' also disables SafeBrowsing, Parental, and blocked services.
+      required: false
+      selector:
+        select:
+          options:
+            - filtering_only
+            - all
