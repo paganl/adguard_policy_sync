@@ -1,0 +1,39 @@
+[
+  {
+    "name": "LR-TV",
+    "ip": "10.2.0.15",
+    "mac": "AA:BB:CC:DD:EE:01",
+    "tags": [
+      "media"
+    ]
+  },
+  {
+    "name": "Nest-Thermostat",
+    "mac": "AA:BB:CC:DD:EE:02",
+    "tags": [
+      "iot"
+    ]
+  },
+  {
+    "name": "Kid-iPad",
+    "ip": "10.2.0.42",
+    "mac": "AA:BB:CC:DD:EE:03",
+    "tags": [
+      "child"
+    ]
+  },
+  {
+    "name": "Mum-iPhone",
+    "ip": "10.2.0.51",
+    "tags": [
+      "adult"
+    ]
+  },
+  {
+    "name": "Guest-Laptop",
+    "mac": "AA:BB:CC:DD:EE:05",
+    "tags": [
+      "guest"
+    ]
+  }
+]
