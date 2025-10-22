@@ -1,0 +1,12 @@
+{
+  "domain": "adguard_policy_sync",
+  "name": "AdGuard Policy Sync",
+  "version": "0.2.5",
+  "documentation": "https://example.invalid/adguard_policy_sync",
+  "requirements": [],
+  "codeowners": [
+    "@you"
+  ],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
