@@ -74,8 +74,13 @@ class AdGuardAPI:
             return {s.get("id",""): s for s in data if isinstance(s, dict) and s.get("id")}
         return {}
 
-    async def clients_status(self):
-        return await self._req("GET", "/control/clients")
+    async def clients_status(self) -> list[dict]:
+        data = await self._req("GET", "/control/clients")
+        if isinstance(data, dict) and isinstance(data.get("clients"), list):
+            return data["clients"]
+        if isinstance(data, list):
+            return data
+        return []
 
     async def clients_search(self, ids: List[str]) -> List[Dict[str, Any]]:
         try:
@@ -97,11 +102,17 @@ class AdGuardAPI:
 
     async def set_custom_rules(self, rules_text: str) -> Any:
         lines = [ln.rstrip("\r") for ln in rules_text.split("\n")]
-        payload_list = [ln for ln in lines if ln.strip() or ln.startswith("!")]
+        cleaned = []
+        for ln in lines:
+            s = ln.strip()
+            if s or s.startswith("!"):   # keep non-empty OR comment lines (even if indented)
+                cleaned.append(ln)
         try:
-            return await self._req("POST", "/control/filtering/set_rules", {"rules": payload_list})
+            return await self._req("POST", "/control/filtering/set_rules", {"rules": cleaned})
         except ClientResponseError as e:
+            # Some older builds expect a single string; fall back if needed
             msg = str(e)
             if "cannot unmarshal array" in msg or ("[]string" in msg and "string" in msg):
                 return await self._req("POST", "/control/filtering/set_rules", {"rules": rules_text})
             raise
+
