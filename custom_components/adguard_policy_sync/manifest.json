@@ -1,7 +1,7 @@
 {
   "domain": "adguard_policy_sync",
   "name": "AdGuard Policy Sync",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "documentation": "https://github.com/paganl/adguard_policy_sync#readme",
   "issue_tracker": "https://github.com/paganl/adguard_policy_sync/issues",
   "requirements": [],
