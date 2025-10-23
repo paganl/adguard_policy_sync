@@ -36,6 +36,16 @@ BLOCKED_SERVICES_PRESETS = {
     "adult":  ["facebook"]
 }
 
+KNOWN_CTAGS = {
+    # user roles
+    "user_child", "user_regular", "user_admin",
+    # device types (AGH’s built-in set)
+    "device_computer", "device_phone", "device_tablet",
+    "device_tv", "device_audio", "device_watch", "device_other",
+    # operating systems
+    "os_windows", "os_macos", "os_ios", "os_android", "os_linux", "os_other",
+}
+
 DEFAULT_RULES = """
 ||doh.cloudflare-dns.com^$ctag=user_child
 ||dns.quad9.net^$ctag=user_child
