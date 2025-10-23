@@ -33,7 +33,7 @@ BLOCKED_SERVICES_PRESETS = {
     "guest":  ["tiktok","snapchat","discord","reddit","steam","roblox"],
     "media":  ["facebook","instagram","tiktok","discord","reddit"],
     "iot":    [],
-    "adult":  []
+    "adult":  ["facebook"]
 }
 
 DEFAULT_RULES = """
@@ -51,6 +51,7 @@ DEFAULT_RULES = """
 ||snapchat.com^$ctag=user_regular
 ||discord.com^$ctag=user_regular
 ||reddit.com^$ctag=user_regular
+@@||prod.zpath.net^$client='ABN AMRO Dell Laptop'
 
 *$ctag=device_other,denyallow=pool.ntp.org|time.google.com|connectivitycheck.gstatic.com|time.windows.com|time.apple.com
 """
