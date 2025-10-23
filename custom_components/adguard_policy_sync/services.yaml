@@ -1,49 +1,49 @@
 sync:
   name: Sync policy to AdGuard Home
-  description: "Apply custom rules and sync clients from a devices JSON. Can optionally scan the LAN first."
+  description: "Applies custom rules and syncs clients from JSON. Can scan the LAN and auto-onboard unknowns."
   fields:
     devices_json:
-      name: Devices JSON (optional)
-      description: "Path to devices JSON; defaults to the config entry value."
+      name: "Devices JSON (optional)"
+      description: "Path under /config, e.g. adguard_devices.json. Uses entry default if omitted."
       required: false
       selector: { text: {} }
     rules_text:
-      name: Custom rules (optional)
-      description: "If provided, replaces current custom rules (dynamic rules may still be appended)."
+      name: "Custom rules (optional)"
+      description: "If provided, replaces current custom rules; dynamic rules may still be appended."
       required: false
       selector: { text: {} }
     scan_range:
-      name: Scan range (optional)
-      description: "CIDR to ping & discover live devices before syncing, e.g. 10.2.0.0/24."
+      name: "Scan range (optional)"
+      description: "CIDR to discover live devices with nmap, e.g. 10.2.0.0/24."
       required: false
       selector: { text: {} }
     auto_onboard_unknowns:
-      name: Auto-onboard unknowns
-      description: "If true, unknown live devices are added as Guest persistent clients."
+      name: "Auto-onboard unknowns"
+      description: "If on, live devices not in JSON are created as Guest persistent clients."
       required: false
       selector: { boolean: {} }
     guest_group:
-      name: Guest group name
-      description: "Friendly group to apply for unknowns (defaults to 'guest')."
+      name: "Guest group name"
+      description: "Friendly group to use for presets for unknowns (default 'guest')."
       required: false
       selector: { text: {} }
 
 discover:
-  name: Discover live devices (ping sweep + ARP) and optionally onboard as Guests
-  description: "Pings a CIDR, reads ARP to find MACs, then adds persistent Guest clients for unknown devices."
+  name: Discover live devices (nmap) and optionally onboard as Guests
+  description: "Runs nmap -sn, learns IP⇄MAC, emits events and can create Guest clients."
   fields:
     scan_range:
-      name: Scan range
+      name: "Scan range"
       description: "CIDR to scan, e.g. 10.2.0.0/24."
       required: true
       selector: { text: {} }
     guest_group:
-      name: Guest group name
-      description: "Friendly group to use for presets when onboarding (default 'guest')."
+      name: "Guest group name"
+      description: "Friendly group for presets when onboarding (default 'guest')."
       required: false
       selector: { text: {} }
     create_clients:
-      name: Create clients
-      description: "If true, creates Guest clients; if false, just emits discovery events."
+      name: "Create Guest clients"
+      description: "If false, just emits events; if true, also adds persistent Guest clients."
       required: false
       selector: { boolean: {} }
