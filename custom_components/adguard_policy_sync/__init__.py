@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import ipaddress
 import json
 import logging
 import os
@@ -27,7 +25,7 @@ from .const import (
     CONF_RULES_TEXT,
     CONF_ALLOWED_GROUPS,
     CONF_APPEND_DYNAMIC_RULES,
-    CONF_SCAN_RANGE,
+    CONF_SCAN_RANGE,       # kept for options parity; no longer used for scanning
     CONF_AUTO_ONBOARD,
     CONF_GUEST_GROUP,
     DEFAULT_RULES,
@@ -40,32 +38,56 @@ from .const import (
     KNOWN_CTAGS,
 )
 
-DHCP_TTL = 90
+DHCP_TTL = 90  # seconds to reuse DHCP cache
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[str] = []
 
 IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
-MAC_RE  = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+MAC_RE  = re.compile(r"^[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}$")
 
 
-def _is_ipv4(s: str) -> bool: return bool(IPV4_RE.match(s))
-def _is_mac(s: str)  -> bool: return bool(MAC_RE.match(s))
+def _is_ipv4(s: str) -> bool:
+    return isinstance(s, str) and bool(IPV4_RE.match(s))
 
-def _normalise_id(idv: str) -> str | None:
-    s = str(idv).strip()
+
+def _norm_mac(s: str | None) -> str | None:
+    """
+    Normalise to lower-case AA:BB:CC:DD:EE:FF.
+    Accepts AABBCCDDEEFF, AA-BB-..., AA:BB:...
+    """
     if not s:
         return None
-    if ":" in s and all(c in "0123456789abcdefABCDEF:" for c in s):
-        s2 = s.lower()
-        return s2 if MAC_RE.match(s2) else s2
-    return s
+    raw = re.sub(r"[^0-9A-Fa-f]", "", s)
+    if len(raw) == 12:
+        mac = ":".join(raw[i:i+2] for i in range(0, 12, 2)).lower()
+        return mac
+    s2 = s.replace("-", ":").lower()
+    return s2 if MAC_RE.match(s2) else None
+
+
+def _format_mac_upper(s: str) -> str:
+    """For logs/UI: AA:BB:CC:DD:EE:FF (upper)."""
+    m = _norm_mac(s)
+    return m.upper() if m else (s or "").upper()
+
+
+def _normalise_id(idv: str) -> str | None:
+    s = str(idv or "").strip()
+    if not s:
+        return None
+    mac = _norm_mac(s)
+    if mac:
+        return mac
+    return s  # IPs / custom IDs passed through
+
 
 def _parse_groups(groups_str: str | None) -> set[str]:
     if not groups_str:
         return set(DEFAULT_ALLOWED_GROUPS)
     parts = [p.strip().lower() for p in groups_str.split(",")]
     return {p for p in parts if p}
+
 
 def _derive_short_id(idv: str) -> str:
     if ":" in idv:
@@ -75,70 +97,100 @@ def _derive_short_id(idv: str) -> str:
         return idv.split(".")[-1]
     return idv[-4:] if len(idv) >= 4 else idv
 
+
 def _unique_name(base_name: str, ids: List[str], existing_names: set) -> str:
     if base_name not in existing_names:
-        existing_names.add(base_name); return base_name
-    sid = _derive_short_id(ids[0]); candidate = f"{base_name} [{sid}]"; name = candidate; i = 2
+        existing_names.add(base_name)
+        return base_name
+    sid = _derive_short_id(ids[0])
+    candidate = f"{base_name} [{sid}]"
+    name = candidate
+    i = 2
     while name in existing_names:
-        name = f"{candidate} #{i}"; i += 1
-    existing_names.add(name); return name
+        name = f"{candidate} #{i}"
+        i += 1
+    existing_names.add(name)
+    return name
+
 
 def _groups_for_device(d: dict[str, Any], allowed_groups: set[str]) -> list[str]:
     tags = [str(t).lower() for t in d.get("tags", []) if t]
     return [g for g in tags if g in allowed_groups]
 
+
 def _ctags_from_json(d: dict[str, Any]) -> list[str]:
     raw = [str(t).strip().lower() for t in d.get("tags", []) if t]
-    out: list[str] = []; seen: set[str] = set()
+    out: list[str] = []
+    seen: set[str] = set()
     for t in raw:
         if t in KNOWN_CTAGS and t not in seen:
-            seen.add(t); out.append(t)
+            seen.add(t)
+            out.append(t)
     return out
+
 
 def _map_groups_to_ctags(groups: list[str]) -> list[str]:
     mapped = [c for g in groups for c in CTAG_MAPPING.get(g, [])]
-    out: list[str] = []; seen: set[str] = set()
+    out: list[str] = []
+    seen: set[str] = set()
     for t in mapped:
-        if t not in seen: seen.add(t); out.append(t)
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
     return out
+
 
 def _infer_groups_from_ctags(ctags: list[str], allowed_groups: set[str]) -> list[str]:
     rev: dict[str, str] = {}
     for grp, ct_list in CTAG_MAPPING.items():
-        for ct in ct_list: rev[ct] = grp
+        for ct in ct_list:
+            rev[ct] = grp
     inferred: list[str] = []
     for t in ctags:
         g = rev.get(t)
-        if g and g in allowed_groups: inferred.append(g)
-    if "user_regular" in ctags and "guest" in allowed_groups: inferred.append("guest")
-    if "user_admin" in ctags and "adult" in allowed_groups: inferred.append("adult")
-    out: list[str] = []; seen: set[str] = set()
+        if g and g in allowed_groups:
+            inferred.append(g)
+    if "user_regular" in ctags and "guest" in allowed_groups:
+        inferred.append("guest")
+    if "user_admin" in ctags and "adult" in allowed_groups:
+        inferred.append("adult")
+    out: list[str] = []
+    seen: set[str] = set()
     for g in inferred:
-        if g not in seen: seen.add(g); out.append(g)
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
     return out
+
 
 async def async_setup(hass: HomeAssistant, config) -> bool:
     return True
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
-    session  = aiohttp_client.async_get_clientsession(hass)
+
+    session = aiohttp_client.async_get_clientsession(hass)
     base_url = entry.data[CONF_BASE_URL]
     username = (entry.data.get(CONF_USERNAME) or "").strip()
     password = (entry.data.get(CONF_PASSWORD) or "").strip()
     verify_ssl = entry.data.get(CONF_VERIFY_SSL, True)
 
-    devices_json       = entry.data.get(CONF_DEVICES_JSON)
-    rules_text         = entry.data.get(CONF_RULES_TEXT) or DEFAULT_RULES
-    allowed_groups     = _parse_groups(entry.data.get(CONF_ALLOWED_GROUPS))
-    append_dyn         = bool(entry.data.get(CONF_APPEND_DYNAMIC_RULES, True))
-    default_scan_range = (entry.data.get(CONF_SCAN_RANGE) or "").strip()
-    default_auto_on    = bool(entry.data.get(CONF_AUTO_ONBOARD, False))
-    default_guest_grp  = (entry.data.get(CONF_GUEST_GROUP) or "guest").strip().lower()
+    devices_json = entry.data.get(CONF_DEVICES_JSON)
+    rules_text = entry.data.get(CONF_RULES_TEXT) or DEFAULT_RULES
+    allowed_groups = _parse_groups(entry.data.get(CONF_ALLOWED_GROUPS))
+    append_dyn = bool(entry.data.get(CONF_APPEND_DYNAMIC_RULES, True))
+    default_scan_range = (entry.data.get(CONF_SCAN_RANGE) or "").strip()  # unused now; kept for options
+    default_auto_on = bool(entry.data.get(CONF_AUTO_ONBOARD, False))
+    default_guest_grp = (entry.data.get(CONF_GUEST_GROUP) or "guest").strip().lower()
 
-    api = AdGuardAPI(session, base_url,
-                     username=username or None, password=password or None,
-                     verify_ssl=verify_ssl)
+    api = AdGuardAPI(
+        session,
+        base_url,
+        username=username or None,
+        password=password or None,
+        verify_ssl=verify_ssl,
+    )
 
     try:
         await api.get_version()
@@ -155,180 +207,127 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         valid_slugs = set()
 
     hass.data[DOMAIN][entry.entry_id] = dict(
-        api=api, devices_json=devices_json, rules_text=rules_text,
-        valid_service_slugs=valid_slugs, allowed_groups=allowed_groups,
+        api=api,
+        devices_json=devices_json,
+        rules_text=rules_text,
+        valid_service_slugs=valid_slugs,
+        allowed_groups=allowed_groups,
         append_dynamic_rules=append_dyn,
-        default_scan_range=default_scan_range,
+        default_scan_range=default_scan_range,   # legacy; ignored for scanning
         default_auto_onboard=default_auto_on,
         default_guest_group=default_guest_grp,
         _pause_state={},
+        _dhcp_cache={},  # mac->ip cache with ts
     )
 
     # --------------------------
-    # Discovery (nmap) helpers
+    # DHCP helper (cached)
     # --------------------------
 
-    async def _nmap_scan(cidr: str) -> list[tuple[str, str]]:
+    async def _mac_to_ipv4_from_dhcp_cached() -> dict[str, str]:
         """
-        Return [(ip, mac)] using `nmap -sn`. Works best with root/cap_net_raw.
-        Falls back to empty list if nmap missing.
+        Build {mac -> ipv4} from AdGuard DHCP leases + static leases, cached briefly.
         """
-        cmd = ["nmap", "-sn", "-PE", "-T4", "--host-timeout", "2s", cidr]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-        except FileNotFoundError:
-            _LOGGER.warning("nmap not found; falling back to ping+ARP")
-            return []
+        store = hass.data[DOMAIN][entry.entry_id]
+        cache = store.get("_dhcp_cache") or {}
+        now = time.monotonic()
+        if cache and (now - cache.get("ts", 0)) < DHCP_TTL:
+            return cache.get("map", {})
 
+        mapping: dict[str, str] = {}
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=90.0)
-        except asyncio.TimeoutError:
-            with contextlib.suppress(ProcessLookupError): proc.kill()
-            return []
-
-        text = out.decode(errors="ignore").splitlines()
-        pairs: list[tuple[str, str]] = []
-        cur_ip: str | None = None
-        for ln in text:
-            # Nmap scan report for 10.2.0.77
-            if "Nmap scan report for " in ln:
-                cur_ip = ln.split()[-1]
-                continue
-            # MAC Address: aa:bb:cc:dd:ee:ff (Vendor)
-            if "MAC Address:" in ln and cur_ip and _is_ipv4(cur_ip):
-                parts = ln.split("MAC Address:")[-1].strip().split()
-                mac = parts[0].lower()
-                if _is_mac(mac):
-                    pairs.append((cur_ip, mac))
-                    cur_ip = None
-        return pairs
-
-    async def _ping_sweep_and_arp(cidr: str) -> list[tuple[str, str]]:
-        """Fallback: ping all hosts (best-effort), then read /proc/net/arp."""
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
+            st = await api.dhcp_status()
+            leases = st.get("leases", []) if isinstance(st, dict) else []
+            for it in leases or []:
+                mac = _norm_mac(it.get("mac"))
+                ip = str(it.get("ip", "")).strip()
+                if mac and _is_ipv4(ip):
+                    mapping.setdefault(mac, ip)
+            stat = st.get("static_leases", [])
+            for it in stat or []:
+                mac = _norm_mac(it.get("mac"))
+                ip = str(it.get("ip", "")).strip()
+                if mac and _is_ipv4(ip):
+                    mapping.setdefault(mac, ip)
         except Exception as e:
-            _LOGGER.error("discover: invalid scan_range '%s': %s", cidr, e)
-            return []
-        hosts = [str(ip) for ip in net.hosts()]
-        sem = asyncio.Semaphore(64)
+            _LOGGER.warning("DHCP status read failed: %s", e)
 
-        async def _ping(ip: str):
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "ping", "-c", "1", "-W", "1", ip,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.communicate(), timeout=2.0)
-            except FileNotFoundError:
-                return
-            except Exception:
-                return
-
-        await asyncio.gather(*(_ping(ip) for ip in hosts), return_exceptions=True)
-
-        def _read_arp():
-            table: dict[str, str] = {}
-            try:
-                with open("/proc/net/arp", "r", encoding="utf-8") as f:
-                    lines = f.read().strip().splitlines()[1:]
-                for ln in lines:
-                    parts = ln.split()
-                    if len(parts) >= 4:
-                        ip, mac = parts[0], parts[3].lower()
-                        if _is_ipv4(ip) and _is_mac(mac):
-                            table[ip] = mac
-            except Exception as e:
-                _LOGGER.debug("ARP read failed: %s", e)
-            return table
-
-        arp = await hass.async_add_executor_job(_read_arp)
-        return [(ip, mac) for ip, mac in arp.items() if ip in hosts]
+        store["_dhcp_cache"] = {"ts": now, "map": mapping}
+        return mapping
 
     # --------------------------
     # Services
     # --------------------------
 
     async def _service_discover(call: ServiceCall) -> None:
+        """
+        No network scan. Purely use DHCP to:
+        - update existing clients so ids contain [MAC, IP],
+        - optionally add Guests for unknown devices.
+        """
         data = hass.data[DOMAIN][entry.entry_id]
-        api: AdGuardAPI = data["api"]
         valid_slugs: set[str] = data.get("valid_service_slugs", set())
-    
-        scan_range = (call.data.get("scan_range") or data.get("default_scan_range") or "").strip()
+
         guest_group = (call.data.get("guest_group") or data.get("default_guest_group") or "guest").strip().lower()
         create_clients = bool(call.data.get("create_clients", True))
-        if not scan_range:
-            _LOGGER.error("discover: scan_range is required")
-            return
-    
-        # 1) nmap first, fallback to ping+ARP
-        pairs = await _nmap_scan(scan_range)
-        if not pairs:
-            pairs = await _ping_sweep_and_arp(scan_range)
-    
-        # 2) Guest preset (filter against live catalogue to avoid 400s)
+
+        dhcp_map = await _mac_to_ipv4_from_dhcp_cached()
+        pairs = [(ip, mac) for mac, ip in dhcp_map.items()]
+
         guest_block = BLOCKED_SERVICES_PRESETS.get(guest_group, [])
         if valid_slugs:
             guest_block = [s for s in guest_block if s in valid_slugs]
-    
-        # 3) Cache existing client names to avoid Guest name collisions
+
         try:
             status = await api.clients_status()
             existing = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
         except Exception:
             existing = []
         existing_names = {c.get("name", "") for c in existing if isinstance(c, dict)}
-    
+
         created = 0
         updated = 0
-    
+
         for ip, mac in pairs:
-            # Always announce discovery (persistent or not)
-            was_persistent = False
+            mac_disp = _format_mac_upper(mac)
+
             try:
                 matched = await api.clients_search([mac, ip])
-                was_persistent = bool(matched)
             except Exception:
                 matched = []
-    
+
             if matched:
-                # Already a persistent client → ensure both identifiers are on it
                 name = matched[0].get("name")
                 ids = matched[0].get("ids") or []
-                have_mac = any(i.lower() == mac for i in ids if isinstance(i, str))
-                have_ip  = any(i == ip for i in ids if isinstance(i, str))
-    
-                if not have_mac or not have_ip:
+                have_mac = any(_norm_mac(i) == mac for i in ids if isinstance(i, str))
+                have_ip = any(i == ip for i in ids if isinstance(i, str))
+                if not (have_mac and have_ip):
                     new_ids = list(dict.fromkeys([*(ids or []), mac, ip]))
                     try:
                         await api.clients_update(name, {"ids": new_ids})
                         updated += 1
                         hass.bus.async_fire(f"{DOMAIN}.guest_identifiers_updated", {"name": name, "ip": ip, "mac": mac})
-                        _LOGGER.info("discover: updated ids for '%s' → %s", name, new_ids)
+                        _LOGGER.info("discover: updated ids for '%s' → [%s, %s]", name, mac_disp, ip)
                     except Exception as e:
                         _LOGGER.error("discover: update ids failed for '%s': %s", name, e)
-    
+
                 hass.bus.async_fire(f"{DOMAIN}.guest_discovered", {"ip": ip, "mac": mac, "persistent": True})
                 continue
-    
-            # Not persistent yet → create Guest if allowed
+
+            # Unknown → optionally add as Guest
             hass.bus.async_fire(f"{DOMAIN}.guest_discovered", {"ip": ip, "mac": mac, "persistent": False})
             if not create_clients:
                 continue
-    
-            # Unique Guest name
-            suffix = (mac.split(":")[-2] + mac.split(":")[-1]) if mac else ip.split(".")[-1]
+
+            suffix = (mac.replace(":", "")[-4:].upper()) if mac else ip.split(".")[-1]
             name = f"Guest [{suffix}]"
             base = name
             i = 2
             while name in existing_names:
-                name = f"{base} #{i}"; i += 1
+                name = f"{base} #{i}"
+                i += 1
             existing_names.add(name)
-    
+
             payload = {
                 "name": name,
                 "ids": [mac, ip],
@@ -339,34 +338,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "parental_enabled": False,
                 "use_global_blocked_services": False,
                 "blocked_services": guest_block,
-                "tags": ["user_regular"],  # valid AGH ctag (avoid friendly names)
+                "tags": ["user_regular"],  # valid AGH ctag
             }
-    
+
             try:
                 await api.clients_add(payload)
                 created += 1
                 hass.bus.async_fire(f"{DOMAIN}.guest_onboarded", {"name": name, "ip": ip, "mac": mac})
-                _LOGGER.info("discover: onboarded Guest '%s' ids=%s", name, [mac, ip])
+                _LOGGER.info("discover: onboarded Guest '%s' ids=[%s, %s]", name, mac_disp, ip)
             except ClientResponseError as cre:
-                # Recover from duplicate-MAC add attempts: parse server error → update instead
-                msg = str(cre)
-                m = re.search(r'another client "([^"]+)" uses the same', msg)
+                # duplicate MAC → recover as update
+                m = re.search(r'another client "([^"]+)" uses the same', str(cre))
                 if m:
                     exist_name = m.group(1)
                     try:
                         await api.clients_update(exist_name, {"ids": list(dict.fromkeys([mac, ip]))})
                         updated += 1
                         hass.bus.async_fire(f"{DOMAIN}.guest_identifiers_updated", {"name": exist_name, "ip": ip, "mac": mac})
-                        _LOGGER.info("discover: recovered by updating '%s' ids=%s", exist_name, [mac, ip])
+                        _LOGGER.info("discover: recovered by updating '%s' ids=[%s, %s]", exist_name, mac_disp, ip)
                         continue
                     except Exception as e2:
                         _LOGGER.error("discover: recovery update failed for '%s': %s", exist_name, e2)
                         continue
-                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac, cre)
+                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac_disp, cre)
             except Exception as e:
-                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac, e)
+                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac_disp, e)
 
-        _LOGGER.info("discover: created %d and updated %d clients in %s", created, updated, scan_range)
+        _LOGGER.info("discover: created %d and updated %d clients (DHCP pairs=%d)", created, updated, len(pairs))
 
     async def _service_sync(call: ServiceCall) -> None:
         data = hass.data[DOMAIN][entry.entry_id]
@@ -378,40 +376,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         json_path = call.data.get("devices_json") or data.get("devices_json")
         rules_text_base = call.data.get("rules_text") or data.get("rules_text") or DEFAULT_RULES
 
-        # Optional pre-scan & auto-onboard
-        scan_range = (call.data.get("scan_range") or data.get("default_scan_range") or "").strip()
+        # Auto-onboard unknowns (DHCP-only now)
         auto_onboard = bool(call.data.get("auto_onboard_unknowns", data.get("default_auto_onboard", False)))
         guest_group = (call.data.get("guest_group") or data.get("default_guest_group") or "guest").strip().lower()
+        if auto_onboard:
+            await _service_discover(ServiceCall(DOMAIN, "discover", {"guest_group": guest_group, "create_clients": True}))
 
-        discovered_pairs: list[tuple[str,str]] = []
-        if scan_range:
-            discovered_pairs = await _nmap_scan(scan_range)
-            if not discovered_pairs:
-                discovered_pairs = await _ping_sweep_and_arp(scan_range)
-            if auto_onboard:
-                await _service_discover(ServiceCall(DOMAIN, "discover",
-                    {"scan_range": scan_range, "guest_group": guest_group, "create_clients": True}))
+        # MAC->IPv4 enrichment map from DHCP (cached) + existing clients
+        mac_to_ipv4: dict[str, str] = {}
+        dhcp_map = await _mac_to_ipv4_from_dhcp_cached()
+        mac_to_ipv4.update(dhcp_map)
 
-        # Build MAC->IP map from scan
-        mac_to_ipv4: dict[str,str] = {}
-        for ip, mac in discovered_pairs:
-            if _is_mac(mac) and _is_ipv4(ip):
-                mac_to_ipv4.setdefault(mac, ip)
-
-        # Load existing clients for name/index and additional MAC->IP learning
         try:
             status_now = await api.clients_status()
             existing_now = status_now.get("clients", []) if isinstance(status_now, dict) else (status_now if isinstance(status_now, list) else [])
         except Exception:
             existing_now = []
-        existing_names = {c.get("name","") for c in existing_now if isinstance(c, dict)}
+        existing_names = {c.get("name", "") for c in existing_now if isinstance(c, dict)}
 
-        # Learn extra MAC->IP from AGH
         for c in existing_now:
-            if not isinstance(c, dict): continue
+            if not isinstance(c, dict):
+                continue
             ids = c.get("ids") or []
-            ips  = [i for i in ids if isinstance(i,str) and _is_ipv4(i)]
-            macs = [i for i in ids if isinstance(i,str) and _is_mac(i)]
+            ips = [i for i in ids if isinstance(i, str) and _is_ipv4(i)]
+            macs = [_norm_mac(i) for i in ids if isinstance(i, str)]
+            macs = [m for m in macs if m]
             if ips:
                 for m in macs:
                     mac_to_ipv4.setdefault(m, ips[0])
@@ -421,8 +410,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if json_path:
             if not os.path.isabs(json_path):
                 json_path = os.path.join(hass.config.path(), json_path)
+
             def _read_json(path: str):
-                with open(path, "r", encoding="utf-8") as f: return json.load(f)
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+
             try:
                 devices = await hass.async_add_executor_job(_read_json, json_path)
             except Exception as e:
@@ -435,20 +427,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if devices:
             plan, groups_to_clients = await _plan_clients(api, devices, valid_slugs, allowed_groups)
 
-        # Ensure every payload has both MAC and IP if we know them
-        # Also flip add->update if any id already belongs to an existing client
-        # Build id->name reverse index once
-        id_to_name: dict[str,str] = {}
+        # Reverse index id->name for deciding add/update
+        id_to_name: dict[str, str] = {}
         for c in existing_now:
-            if not isinstance(c, dict): continue
+            if not isinstance(c, dict):
+                continue
             nm = c.get("name")
             for i in (c.get("ids") or []):
-                if isinstance(i,str): id_to_name[i] = nm
+                if isinstance(i, str):
+                    id_to_name[i] = nm
 
         def _existing_name_for_ids(ids: list[str]) -> str | None:
             for i in ids or []:
                 nm = id_to_name.get(i)
-                if nm: return nm
+                if nm:
+                    return nm
             return None
 
         # Dynamic rules
@@ -462,10 +455,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("Failed to set custom rules: %s", e)
 
+        # Apply plan
         for final_name, client_payload, should_update in plan:
-            # Union MAC + IP
+            # Ensure MAC + IP in ids
             ids = list(client_payload.get("ids") or [])
-            macs = [i for i in ids if _is_mac(i)]
+            macs = [_norm_mac(i) for i in ids]
+            macs = [m for m in macs if m]
             has_v4 = any(_is_ipv4(i) for i in ids)
             if macs and not has_v4:
                 live = mac_to_ipv4.get(macs[0])
@@ -473,7 +468,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ids.append(live)
             client_payload["ids"] = ids
 
-            # Decide add/update (persistent) and recover duplicate adds
+            # Decide add/update and recover duplicate adds
             target_name = final_name
             action_update = bool(should_update)
             if not action_update:
@@ -489,7 +484,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     await api.clients_add(client_payload)
                 # success: learn ids→name for later items
-                for i in ids: id_to_name[i] = target_name
+                for i in ids:
+                    id_to_name[i] = target_name
 
             except ClientResponseError as cre:
                 msg = f"{cre}"
@@ -499,24 +495,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     client_payload["name"] = existing_for_ids
                     try:
                         await api.clients_update(existing_for_ids, client_payload)
-                        for i in ids: id_to_name[i] = existing_for_ids
+                        for i in ids:
+                            id_to_name[i] = existing_for_ids
                         continue
                     except Exception as e2:
-                        _LOGGER.error("Retry as update failed for %s → %s: %s | Payload=%s",
-                                      final_name, existing_for_ids, e2,
-                                      {k: client_payload.get(k) for k in ("name","ids","tags","blocked_services","use_global_blocked_services")})
+                        _LOGGER.error(
+                            "Retry as update failed for %s → %s: %s | Payload=%s",
+                            final_name,
+                            existing_for_ids,
+                            e2,
+                            {
+                                k: client_payload.get(k)
+                                for k in (
+                                    "name",
+                                    "ids",
+                                    "tags",
+                                    "blocked_services",
+                                    "use_global_blocked_services",
+                                )
+                            },
+                        )
                         continue
 
-                _LOGGER.error("Client push failed for %s: %s | Payload=%s",
-                              final_name, cre,
-                              {k: client_payload.get(k) for k in ("name","ids","tags","use_global_settings",
-                                                                   "blocked_services","use_global_blocked_services",
-                                                                   "safesearch_enabled","safebrowsing_enabled","parental_enabled")})
+                _LOGGER.error(
+                    "Client push failed for %s: %s | Payload=%s",
+                    final_name,
+                    cre,
+                    {
+                        k: client_payload.get(k)
+                        for k in (
+                            "name",
+                            "ids",
+                            "tags",
+                            "use_global_settings",
+                            "blocked_services",
+                            "use_global_blocked_services",
+                            "safesearch_enabled",
+                            "safebrowsing_enabled",
+                            "parental_enabled",
+                        )
+                    },
+                )
                 continue
 
             except Exception as e:
-                _LOGGER.error("Client push failed for %s: %s | Payload=%s", final_name, e,
-                              {k: client_payload.get(k) for k in ("name","ids","tags","use_global_blocked_services","blocked_services")})
+                _LOGGER.error(
+                    "Client push failed for %s: %s | Payload=%s",
+                    final_name,
+                    e,
+                    {
+                        k: client_payload.get(k)
+                        for k in ("name", "ids", "tags", "use_global_blocked_services", "blocked_services")
+                    },
+                )
                 continue
 
     async def _service_pause(call: ServiceCall) -> None:
@@ -526,19 +557,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         scope = str(call.data.get("scope", "filtering_only")).lower()
         clients = call.data.get("clients") or []
         if not clients:
-            _LOGGER.error("pause: no clients provided"); return
+            _LOGGER.error("pause: no clients provided")
+            return
 
         try:
             status = await api.clients_status()
             existing = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
         except Exception as e:
-            _LOGGER.error("pause: failed to list clients: %s", e); return
+            _LOGGER.error("pause: failed to list clients: %s", e)
+            return
 
         indexed = {c.get("name"): c for c in existing if isinstance(c, dict) and c.get("name")}
         for name in clients:
             c = indexed.get(name)
             if not c:
-                _LOGGER.warning("pause: client '%s' not found", name); continue
+                _LOGGER.warning("pause: client '%s' not found", name)
+                continue
 
             prev = {
                 "filtering_enabled": bool(c.get("filtering_enabled", True)),
@@ -551,17 +585,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             payload = {"filtering_enabled": False}
             if scope == "all":
-                payload.update({"safebrowsing_enabled": False, "parental_enabled": False,
-                                "use_global_blocked_services": False, "blocked_services": []})
+                payload.update(
+                    {
+                        "safebrowsing_enabled": False,
+                        "parental_enabled": False,
+                        "use_global_blocked_services": False,
+                        "blocked_services": [],
+                    }
+                )
             try:
                 await api.clients_update(name, payload)
                 _LOGGER.info("pause: paused '%s' for %d minutes (scope=%s)", name, minutes, scope)
             except Exception as e:
-                _LOGGER.error("pause: update failed for '%s': %s", name, e); continue
+                _LOGGER.error("pause: update failed for '%s': %s", name, e)
+                continue
 
             async def _restore_cb(now):
                 snap = hass.data[DOMAIN][entry.entry_id]["_pause_state"].pop(name, None)
-                if not snap: return
+                if not snap:
+                    return
                 try:
                     await api.clients_update(name, snap)
                     _LOGGER.info("pause: restored '%s'", name)
@@ -574,27 +616,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "sync", _service_sync)
     hass.services.async_register(DOMAIN, "pause", _service_pause)
 
-    # Kick off an initial sync if a JSON path is configured
     if devices_json:
         hass.async_create_task(hass.services.async_call(DOMAIN, "sync", {}, blocking=False))
+
     return True
 
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    with contextlib.suppress(Exception): hass.services.async_remove(DOMAIN, "discover")
-    with contextlib.suppress(Exception): hass.services.async_remove(DOMAIN, "sync")
-    with contextlib.suppress(Exception): hass.services.async_remove(DOMAIN, "pause")
+    with contextlib.suppress(Exception):
+        hass.services.async_remove(DOMAIN, "discover")
+    with contextlib.suppress(Exception):
+        hass.services.async_remove(DOMAIN, "sync")
+    with contextlib.suppress(Exception):
+        hass.services.async_remove(DOMAIN, "pause")
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
 
-async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_slugs: set[str],
-                        allowed_groups: set[str]) -> Tuple[List[Tuple[str, dict, bool]], Dict[str, List[str]]]:
-    # Use clients_status for names/index; clients_search decides add vs update
+
+async def _plan_clients(
+    api: AdGuardAPI, devices: list[dict[str, Any]], valid_slugs: set[str], allowed_groups: set[str]
+) -> Tuple[List[Tuple[str, dict, bool]], Dict[str, List[str]]]:
     try:
         status = await api.clients_status()
         existing = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
     except Exception:
         existing = []
-    existing_names = {c.get("name","") for c in existing if isinstance(c, dict)}
+    existing_names = {c.get("name", "") for c in existing if isinstance(c, dict)}
 
     plan: List[Tuple[str, dict, bool]] = []
     groups_to_clients: Dict[str, List[str]] = {}
@@ -619,7 +666,8 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
         seen: set[str] = set()
         for v in raw_ids:
             if v not in seen:
-                seen.add(v); ids.append(v)
+                seen.add(v)
+                ids.append(v)
 
         if not ids:
             _LOGGER.warning("Skipping '%s': no ids provided", desired_name)
@@ -640,7 +688,7 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
         for g in groups:
             groups_to_clients.setdefault(g, []).append(final_name)
 
-        # Features with sensible cohort defaults (overridable per device)
+        # Features with cohort defaults (overridable per device)
         safesearch = (
             True if d.get("safesearch") is True else
             False if d.get("safesearch") is False else
@@ -657,19 +705,23 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
             (any(g in PARENTAL_GROUPS for g in groups) or any(t in PARENTAL_CTAGS for t in ctags))
         )
 
-        # Blocked services: device override or cohort presets (filtered)
+        # Blocked services: per-device override or cohort preset
         if "blocked_services" in d:
             blocked = [s for s in (d.get("blocked_services") or [])]
-            if valid_slugs: blocked = [s for s in blocked if s in valid_slugs]
+            if valid_slugs:
+                blocked = [s for s in blocked if s in valid_slugs]
             use_global_bs = bool(d.get("use_global_blocked_services", False))
         else:
             wanted = [slug for g in groups for slug in BLOCKED_SERVICES_PRESETS.get(g, [])]
-            if valid_slugs: wanted = [s for s in wanted if s in valid_slugs]
+            if valid_slugs:
+                wanted = [s for s in wanted if s in valid_slugs]
             blocked = sorted(set(wanted))
             use_global_bs = False
 
         client_payload: dict[str, Any] = {
-            "name": final_name, "ids": ids, "use_global_settings": False,
+            "name": final_name,
+            "ids": ids,
+            "use_global_settings": False,
             "filtering_enabled": True,
             "parental_enabled": bool(parental),
             "safebrowsing_enabled": bool(safebrowsing),
@@ -680,16 +732,26 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
         if ctags:
             client_payload["tags"] = ctags
 
-        _LOGGER.info("Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
-                     final_name, ctags, safebrowsing, parental, safesearch, blocked, use_global_bs)
+        _LOGGER.info(
+            "Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
+            final_name,
+            ctags,
+            safebrowsing,
+            parental,
+            safesearch,
+            blocked,
+            use_global_bs,
+        )
 
         plan.append((final_name, client_payload, should_update))
 
     return plan, groups_to_clients
 
+
 def _fmt_client_union(names: List[str]) -> str:
     quoted = ["'" + n.replace("'", "\\'") + "'" for n in names]
     return "|".join(quoted)
+
 
 def _generate_dynamic_rules(groups_to_clients: Dict[str, List[str]]) -> str:
     lines = ["! ---- Dynamically generated $client rules ----"]
