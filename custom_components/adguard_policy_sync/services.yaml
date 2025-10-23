@@ -1,47 +1,49 @@
 sync:
   name: Sync policy to AdGuard Home
-  description: "Generates and applies custom rules, then syncs clients from a devices JSON."
+  description: "Apply custom rules and sync clients from a devices JSON. Can optionally scan the LAN first."
   fields:
     devices_json:
-      name: "Devices JSON path (optional)"
-      description: "Path to devices JSON. If omitted, uses the path from the config entry."
-      example: adguard_devices.json
+      name: Devices JSON (optional)
+      description: "Path to devices JSON; defaults to the config entry value."
       required: false
-      selector:
-        text: {}
+      selector: { text: {} }
     rules_text:
-      name: "Custom rules (optional)"
-      description: "If provided, replaces the current custom rules (dynamic rules may still be appended if enabled)."
+      name: Custom rules (optional)
+      description: "If provided, replaces current custom rules (dynamic rules may still be appended)."
       required: false
-      selector:
-        text: {}
+      selector: { text: {} }
+    scan_range:
+      name: Scan range (optional)
+      description: "CIDR to ping & discover live devices before syncing, e.g. 10.2.0.0/24."
+      required: false
+      selector: { text: {} }
+    auto_onboard_unknowns:
+      name: Auto-onboard unknowns
+      description: "If true, unknown live devices are added as Guest persistent clients."
+      required: false
+      selector: { boolean: {} }
+    guest_group:
+      name: Guest group name
+      description: "Friendly group to apply for unknowns (defaults to 'guest')."
+      required: false
+      selector: { text: {} }
 
-pause:
-  name: Pause protection for clients
-  description: "Temporarily disables protection for selected clients and automatically restores it."
+discover:
+  name: Discover live devices (ping sweep + ARP) and optionally onboard as Guests
+  description: "Pings a CIDR, reads ARP to find MACs, then adds persistent Guest clients for unknown devices."
   fields:
-    clients:
-      name: "Client names"
-      description: "Exact client names as shown in AdGuard Home."
+    scan_range:
+      name: Scan range
+      description: "CIDR to scan, e.g. 10.2.0.0/24."
       required: true
-      selector:
-        text: {}
-    minutes:
-      name: Minutes
-      description: "Duration of the pause (default 15)."
+      selector: { text: {} }
+    guest_group:
+      name: Guest group name
+      description: "Friendly group to use for presets when onboarding (default 'guest')."
       required: false
-      selector:
-        number:
-          min: 1
-          max: 240
-          mode: box
-          unit_of_measurement: minutes
-    scope:
-      name: Scope
-      description: "Use 'filtering_only' to disable only filtering rules; use 'all' to also disable Browsing Security, Parental, and clear blocked services."
+      selector: { text: {} }
+    create_clients:
+      name: Create clients
+      description: "If true, creates Guest clients; if false, just emits discovery events."
       required: false
-      selector:
-        select:
-          options:
-            - filtering_only
-            - all
+      selector: { boolean: {} }
