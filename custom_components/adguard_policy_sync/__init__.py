@@ -254,55 +254,78 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         data = hass.data[DOMAIN][entry.entry_id]
         api: AdGuardAPI = data["api"]
         valid_slugs: set[str] = data.get("valid_service_slugs", set())
-
+    
         scan_range = (call.data.get("scan_range") or data.get("default_scan_range") or "").strip()
         guest_group = (call.data.get("guest_group") or data.get("default_guest_group") or "guest").strip().lower()
         create_clients = bool(call.data.get("create_clients", True))
         if not scan_range:
             _LOGGER.error("discover: scan_range is required")
             return
-
-        # 1) nmap first, then fallback
+    
+        # 1) nmap first, fallback to ping+ARP
         pairs = await _nmap_scan(scan_range)
         if not pairs:
             pairs = await _ping_sweep_and_arp(scan_range)
-
-        # 2) Build guest preset (filtered)
+    
+        # 2) Guest preset (filter against live catalogue to avoid 400s)
         guest_block = BLOCKED_SERVICES_PRESETS.get(guest_group, [])
         if valid_slugs:
             guest_block = [s for s in guest_block if s in valid_slugs]
-
-        # 3) Check existing persistent matches
+    
+        # 3) Cache existing client names to avoid Guest name collisions
         try:
             status = await api.clients_status()
             existing = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
         except Exception:
             existing = []
-        existing_names = {c.get("name","") for c in existing if isinstance(c, dict)}
-
+        existing_names = {c.get("name", "") for c in existing if isinstance(c, dict)}
+    
         created = 0
+        updated = 0
+    
         for ip, mac in pairs:
+            # Always announce discovery (persistent or not)
+            was_persistent = False
             try:
                 matched = await api.clients_search([mac, ip])
+                was_persistent = bool(matched)
             except Exception:
                 matched = []
-
+    
             if matched:
+                # Already a persistent client → ensure both identifiers are on it
+                name = matched[0].get("name")
+                ids = matched[0].get("ids") or []
+                have_mac = any(i.lower() == mac for i in ids if isinstance(i, str))
+                have_ip  = any(i == ip for i in ids if isinstance(i, str))
+    
+                if not have_mac or not have_ip:
+                    new_ids = list(dict.fromkeys([*(ids or []), mac, ip]))
+                    try:
+                        await api.clients_update(name, {"ids": new_ids})
+                        updated += 1
+                        hass.bus.async_fire(f"{DOMAIN}.guest_identifiers_updated", {"name": name, "ip": ip, "mac": mac})
+                        _LOGGER.info("discover: updated ids for '%s' → %s", name, new_ids)
+                    except Exception as e:
+                        _LOGGER.error("discover: update ids failed for '%s': %s", name, e)
+    
                 hass.bus.async_fire(f"{DOMAIN}.guest_discovered", {"ip": ip, "mac": mac, "persistent": True})
                 continue
-
+    
+            # Not persistent yet → create Guest if allowed
             hass.bus.async_fire(f"{DOMAIN}.guest_discovered", {"ip": ip, "mac": mac, "persistent": False})
             if not create_clients:
                 continue
-
-            # unique Guest name
+    
+            # Unique Guest name
             suffix = (mac.split(":")[-2] + mac.split(":")[-1]) if mac else ip.split(".")[-1]
             name = f"Guest [{suffix}]"
-            base = name; i = 2
+            base = name
+            i = 2
             while name in existing_names:
                 name = f"{base} #{i}"; i += 1
             existing_names.add(name)
-
+    
             payload = {
                 "name": name,
                 "ids": [mac, ip],
@@ -313,17 +336,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "parental_enabled": False,
                 "use_global_blocked_services": False,
                 "blocked_services": guest_block,
-                "tags": ["user_regular"],  # valid AGH ctag
+                "tags": ["user_regular"],  # valid AGH ctag (avoid friendly names)
             }
+    
             try:
                 await api.clients_add(payload)
                 created += 1
                 hass.bus.async_fire(f"{DOMAIN}.guest_onboarded", {"name": name, "ip": ip, "mac": mac})
                 _LOGGER.info("discover: onboarded Guest '%s' ids=%s", name, [mac, ip])
+            except ClientResponseError as cre:
+                # Recover from duplicate-MAC add attempts: parse server error → update instead
+                msg = str(cre)
+                m = re.search(r'another client "([^"]+)" uses the same', msg)
+                if m:
+                    exist_name = m.group(1)
+                    try:
+                        await api.clients_update(exist_name, {"ids": list(dict.fromkeys([mac, ip]))})
+                        updated += 1
+                        hass.bus.async_fire(f"{DOMAIN}.guest_identifiers_updated", {"name": exist_name, "ip": ip, "mac": mac})
+                        _LOGGER.info("discover: recovered by updating '%s' ids=%s", exist_name, [mac, ip])
+                        continue
+                    except Exception as e2:
+                        _LOGGER.error("discover: recovery update failed for '%s': %s", exist_name, e2)
+                        continue
+                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac, cre)
             except Exception as e:
                 _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac, e)
 
-        _LOGGER.info("discover: created %d Guest clients (range %s)", created, scan_range)
+        _LOGGER.info("discover: created %d and updated %d clients in %s", created, updated, scan_range)
 
     async def _service_sync(call: ServiceCall) -> None:
         data = hass.data[DOMAIN][entry.entry_id]
