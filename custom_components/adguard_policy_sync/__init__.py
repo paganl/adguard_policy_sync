@@ -4,25 +4,42 @@ import json
 import logging
 import os
 import re
+from datetime import timedelta
 from typing import Any, Dict, List, Tuple
 
-from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import aiohttp_client, event as ha_event
-from datetime import timedelta
 
-from .const import (
-    DOMAIN, CONF_BASE_URL, CONF_DEVICES_JSON, CONF_RULES_TEXT, CONF_ALLOWED_GROUPS, CONF_APPEND_DYNAMIC_RULES,
-    DEFAULT_RULES, DEFAULT_ALLOWED_GROUPS, CTAG_MAPPING, SAFESEARCH_GROUPS, SAFESEARCH_CTAGS, SAFEBROWSING_GROUPS,
-    SAFEBROWSING_CTAGS, PARENTAL_GROUPS, PARENTAL_CTAGS, BLOCKED_SERVICES_PRESETS
-)
 from .api import AdGuardAPI
+from .const import (
+    DOMAIN,
+    CONF_BASE_URL,
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    CONF_VERIFY_SSL,
+    CONF_DEVICES_JSON,
+    CONF_RULES_TEXT,
+    CONF_ALLOWED_GROUPS,
+    CONF_APPEND_DYNAMIC_RULES,
+    DEFAULT_RULES,
+    DEFAULT_ALLOWED_GROUPS,
+    CTAG_MAPPING,
+    SAFESEARCH_GROUPS,
+    SAFESEARCH_CTAGS,
+    SAFEBROWSING_GROUPS,
+    SAFEBROWSING_CTAGS,
+    PARENTAL_GROUPS,
+    PARENTAL_CTAGS,
+    BLOCKED_SERVICES_PRESETS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[str] = []
 
 MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
+
 
 def _normalise_id(idv: str) -> str | None:
     s = str(idv).strip()
@@ -35,11 +52,13 @@ def _normalise_id(idv: str) -> str | None:
         return s2
     return s
 
+
 def _parse_groups(groups_str: str | None) -> set[str]:
     if not groups_str:
         return set(DEFAULT_ALLOWED_GROUPS)
     parts = [p.strip().lower() for p in groups_str.split(",")]
     return {p for p in parts if p}
+
 
 def _derive_short_id(idv: str) -> str:
     if ":" in idv:
@@ -50,6 +69,7 @@ def _derive_short_id(idv: str) -> str:
     if "." in idv:
         return idv.split(".")[-1]
     return idv[-4:] if len(idv) >= 4 else idv
+
 
 def _unique_name(base_name: str, ids: List[str], existing_names: set) -> str:
     if base_name not in existing_names:
@@ -65,39 +85,58 @@ def _unique_name(base_name: str, ids: List[str], existing_names: set) -> str:
     existing_names.add(name)
     return name
 
+
 async def async_setup(hass: HomeAssistant, config) -> bool:
     return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     session = aiohttp_client.async_get_clientsession(hass)
     base_url = entry.data[CONF_BASE_URL]
-    username = (entry.data.get("username") or "").strip()
-    password = (entry.data.get("password") or "").strip()
-    verify_ssl = entry.data.get("verify_ssl", True)
+    username = (entry.data.get(CONF_USERNAME) or "").strip()
+    password = (entry.data.get(CONF_PASSWORD) or "").strip()
+    verify_ssl = entry.data.get(CONF_VERIFY_SSL, True)
     devices_json = entry.data.get(CONF_DEVICES_JSON)
     rules_text = entry.data.get(CONF_RULES_TEXT) or DEFAULT_RULES
-    allowed_groups = _parse_groups(entry.data.get("allowed_groups"))
-    append_dynamic_rules = bool(entry.data.get("append_dynamic_rules", True))
+    allowed_groups = _parse_groups(entry.data.get(CONF_ALLOWED_GROUPS))
+    append_dynamic_rules = bool(entry.data.get(CONF_APPEND_DYNAMIC_RULES, True))
 
-    api = AdGuardAPI(session, base_url, username=username or None, password=password or None, verify_ssl=verify_ssl)
+    api = AdGuardAPI(
+        session,
+        base_url,
+        username=username or None,
+        password=password or None,
+        verify_ssl=verify_ssl,
+    )
 
+    # Best-effort connectivity; still register services
     try:
         await api.get_version()
+        _LOGGER.info("AdGuard Policy Sync: connected to %s", base_url)
     except Exception as e:
-        _LOGGER.warning("Cannot reach %s yet: %s (services still registered)", base_url, e)
+        _LOGGER.warning(
+            "AdGuard Policy Sync: cannot reach %s yet: %s (services still registered)",
+            base_url,
+            e,
+        )
 
+    # Blocked services catalog is optional
     try:
         catalog = await api.list_blocked_services_catalog()
         valid_slugs = set(catalog.keys())
+        _LOGGER.info("Loaded %d blocked services from AdGuard", len(valid_slugs))
     except Exception as e:
         _LOGGER.warning("Could not load blocked services catalog: %s", e)
         valid_slugs = set()
 
     hass.data[DOMAIN][entry.entry_id] = {
-        "api": api, "devices_json": devices_json, "rules_text": rules_text,
-        "valid_service_slugs": valid_slugs, "allowed_groups": allowed_groups,
+        "api": api,
+        "devices_json": devices_json,
+        "rules_text": rules_text,
+        "valid_service_slugs": valid_slugs,
+        "allowed_groups": allowed_groups,
         "append_dynamic_rules": append_dynamic_rules,
         "_pause_state": {},
     }
@@ -106,10 +145,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         data = hass.data[DOMAIN][entry.entry_id]
         api: AdGuardAPI = data["api"]
         valid_slugs: set[str] = data.get("valid_service_slugs", set())
-        allowed_groups: set[str] = data.get("allowed_groups", set(DEFAULT_ALLOWED_GROUPS))
+        allowed_groups: set[str] = data.get(
+            "allowed_groups", set(DEFAULT_ALLOWED_GROUPS)
+        )
         append_dynamic_rules: bool = data.get("append_dynamic_rules", True)
         json_path = call.data.get("devices_json") or data.get("devices_json")
-        rules_text_base = call.data.get("rules_text") or data.get("rules_text") or DEFAULT_RULES
+        rules_text_base = (
+            call.data.get("rules_text") or data.get("rules_text") or DEFAULT_RULES
+        )
 
         devices: list[dict[str, Any]] | None = None
         if json_path:
@@ -130,12 +173,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         plan: List[Tuple[str, dict, bool]] = []
 
         if devices:
-            plan, groups_to_clients = await _plan_clients(api, devices, valid_slugs, allowed_groups)
+            plan, groups_to_clients = await _plan_clients(
+                api, devices, valid_slugs, allowed_groups
+            )
 
         rules_text = rules_text_base
         if append_dynamic_rules and groups_to_clients:
             dyn = _generate_dynamic_rules(groups_to_clients)
-            rules_text = rules_text.rstrip() + "\\n\\n" + dyn + "\\n"
+            rules_text = rules_text.rstrip() + "\n\n" + dyn + "\n"
 
         try:
             await api.set_custom_rules(rules_text)
@@ -149,8 +194,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     await api.clients_add(client_payload)
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).error("Client push failed for %s: %s | Payload=%s", final_name, e, {k: client_payload[k] for k in ("name","ids","tags","use_global_settings","blocked_services","use_global_blocked_services","safesearch_enabled","safebrowsing_enabled","parental_enabled")})
+                _LOGGER.error(
+                    "Client push failed for %s: %s | Payload=%s",
+                    final_name,
+                    e,
+                    {
+                        k: client_payload.get(k)
+                        for k in (
+                            "name",
+                            "ids",
+                            "tags",
+                            "use_global_settings",
+                            "blocked_services",
+                            "use_global_blocked_services",
+                            "safesearch_enabled",
+                            "safebrowsing_enabled",
+                            "parental_enabled",
+                        )
+                    },
+                )
                 continue
 
     async def _service_pause(call: ServiceCall) -> None:
@@ -166,12 +228,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             status = await api.clients_status()
-            existing_clients = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
+            if isinstance(status, dict):
+                existing_clients = status.get("clients", [])
+            elif isinstance(status, list):
+                existing_clients = status
+            else:
+                existing_clients = []
         except Exception as e:
             _LOGGER.error("pause: failed to list clients: %s", e)
             return
 
-        indexed = {c.get("name"): c for c in existing_clients if isinstance(c, dict) and c.get("name")}
+        indexed = {
+            c.get("name"): c
+            for c in existing_clients
+            if isinstance(c, dict) and c.get("name")
+        }
 
         for name in clients:
             c = indexed.get(name)
@@ -183,31 +254,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "filtering_enabled": bool(c.get("filtering_enabled", True)),
                 "safebrowsing_enabled": bool(c.get("safebrowsing_enabled", False)),
                 "parental_enabled": bool(c.get("parental_enabled", False)),
-                "use_global_blocked_services": bool(c.get("use_global_blocked_services", True)),
+                "use_global_blocked_services": bool(
+                    c.get("use_global_blocked_services", True)
+                ),
                 "blocked_services": c.get("blocked_services", []),
             }
             hass.data[DOMAIN][entry.entry_id]["_pause_state"][name] = prev
 
             payload = {"filtering_enabled": False}
             if scope == "all":
-                payload.update({
-                    "safebrowsing_enabled": False,
-                    "parental_enabled": False,
-                    "use_global_blocked_services": False,
-                    "blocked_services": [],
-                })
+                payload.update(
+                    {
+                        "safebrowsing_enabled": False,
+                        "parental_enabled": False,
+                        "use_global_blocked_services": False,
+                        "blocked_services": [],
+                    }
+                )
             try:
                 await api.clients_update(name, payload)
+                _LOGGER.info(
+                    "pause: paused '%s' for %d minutes (scope=%s)",
+                    name,
+                    minutes,
+                    scope,
+                )
             except Exception as e:
                 _LOGGER.error("pause: update failed for '%s': %s", name, e)
                 continue
 
             async def _restore_cb(now):
-                snap = hass.data[DOMAIN][entry.entry_id]["_pause_state"].pop(name, None)
+                snap = hass.data[DOMAIN][entry.entry_id]["_pause_state"].pop(
+                    name, None
+                )
                 if not snap:
                     return
                 try:
                     await api.clients_update(name, snap)
+                    _LOGGER.info("pause: restored '%s'", name)
                 except Exception as e:
                     _LOGGER.error("pause: restore failed for '%s': %s", name, e)
 
@@ -217,9 +301,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "pause", _service_pause)
 
     if devices_json:
-        hass.async_create_task(hass.services.async_call(DOMAIN, "sync", {}, blocking=False))
+        hass.async_create_task(
+            hass.services.async_call(DOMAIN, "sync", {}, blocking=False)
+        )
 
     return True
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_remove(DOMAIN, "sync")
@@ -227,14 +314,49 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
 
+
 def _groups_for_device(d: dict[str, Any], allowed_groups: set[str]) -> list[str]:
     tags = [str(t).lower() for t in d.get("tags", []) if t]
     return [g for g in tags if g in allowed_groups]
 
+
+def _infer_groups_from_ctags(ctags: list[str], allowed_groups: set[str]) -> list[str]:
+    """
+    Map known AGH ctags back to our friendly groups so cohort defaults apply
+    even when the JSON uses only ctags.
+    """
+    # Build a reverse map once from CTAG_MAPPING
+    rev: dict[str, str] = {}
+    for grp, ct_list in CTAG_MAPPING.items():
+        for ct in ct_list:
+            rev[ct] = grp
+
+    inferred: list[str] = []
+    for t in ctags:
+        g = rev.get(t)
+        if g and g in allowed_groups:
+            inferred.append(g)
+
+    # User cohorts if only user_* ctags are present
+    if "user_regular" in ctags and "guest" in allowed_groups:
+        inferred.append("guest")
+    if "user_admin" in ctags and "adult" in allowed_groups:
+        inferred.append("adult")
+
+    # De-dup while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for g in inferred:
+        if g not in seen:
+            seen.add(g)
+            out.append(g)
+    return out
+
+
 def _ctags_passthrough_unfiltered(d: dict[str, Any]) -> list[str]:
     raw = [str(t).strip().lower() for t in d.get("tags", []) if t]
-    out = []
-    seen = set()
+    out: list[str] = []
+    seen: set[str] = set()
     for t in raw:
         if not t:
             continue
@@ -244,20 +366,38 @@ def _ctags_passthrough_unfiltered(d: dict[str, Any]) -> list[str]:
                 out.append(t)
     return out
 
+
 def _map_groups_to_ctags(groups: list[str]) -> list[str]:
     mapped = [c for g in groups for c in CTAG_MAPPING.get(g, [])]
-    return list(dict.fromkeys(mapped))
+    # De-dup while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in mapped:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
-async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_slugs: set[str],
-                        allowed_groups: set[str]) -> Tuple[List[Tuple[str, dict, bool]], Dict[str, List[str]]]:
+
+async def _plan_clients(
+    api: AdGuardAPI,
+    devices: list[dict[str, Any]],
+    valid_slugs: set[str],
+    allowed_groups: set[str],
+) -> Tuple[List[Tuple[str, dict, bool]], Dict[str, List[str]]]:
     try:
         status = await api.clients_status()
-        existing_clients = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
+        if isinstance(status, dict):
+            existing_clients = status.get("clients", [])
+        elif isinstance(status, list):
+            existing_clients = status
+        else:
+            existing_clients = []
     except Exception:
         existing_clients = []
 
-    existing_names = {c.get("name","") for c in existing_clients if isinstance(c, dict)}
-    existing_ids = set()
+    existing_names = {c.get("name", "") for c in existing_clients if isinstance(c, dict)}
+    existing_ids: set[str] = set()
     for c in existing_clients:
         ids_list = c.get("ids") if isinstance(c, dict) else None
         if isinstance(ids_list, list):
@@ -269,22 +409,26 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
 
     for d in devices:
         desired_name = d.get("name") or "unnamed"
-        groups = _groups_for_device(d, allowed_groups)
+        explicit_groups = _groups_for_device(d, allowed_groups)
         passthrough_ctags = _ctags_passthrough_unfiltered(d)
-        mapped_ctags = _map_groups_to_ctags(groups)
+        mapped_ctags = _map_groups_to_ctags(explicit_groups)
         ctags = list(dict.fromkeys(passthrough_ctags + mapped_ctags))
+
+        # Infer groups from ctags and union with explicit groups
+        inferred_groups = _infer_groups_from_ctags(ctags, allowed_groups)
+        groups = list(dict.fromkeys(explicit_groups + inferred_groups))
 
         ip = d.get("ip")
         mac = d.get("mac")
         arbitrary_id = d.get("id")
-        raw_ids = []
+        raw_ids: list[str] = []
         for v in (ip, mac, arbitrary_id):
             if v:
                 nid = _normalise_id(v)
                 if nid:
                     raw_ids.append(nid)
-        ids = []
-        seen = set()
+        ids: list[str] = []
+        seen: set[str] = set()
         for v in raw_ids:
             if v not in seen:
                 seen.add(v)
@@ -309,33 +453,46 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
         for g in groups:
             groups_to_clients.setdefault(g, []).append(final_name)
 
-        # Feature flags with overrides
-        safesearch = bool(d.get("safesearch", False)) \
-                     or any(g in SAFESEARCH_GROUPS for g in groups) \
-                     or any(t in SAFESEARCH_CTAGS for t in ctags)
+        # Feature flags with overrides (honour explicit booleans; else cohort defaults/ctags)
+        safesearch = (
+            True
+            if d.get("safesearch") is True
+            else False
+            if d.get("safesearch") is False
+            else (any(g in SAFESEARCH_GROUPS for g in groups) or any(t in SAFESEARCH_CTAGS for t in ctags))
+        )
 
         safebrowsing = (
-            True if d.get("safebrowsing") is True else
-            False if d.get("safebrowsing") is False else
-            (any(g in SAFEBROWSING_GROUPS for g in groups) or any(t in SAFEBROWSING_CTAGS for t in ctags))
+            True
+            if d.get("safebrowsing") is True
+            else False
+            if d.get("safebrowsing") is False
+            else (any(g in SAFEBROWSING_GROUPS for g in groups) or any(t in SAFEBROWSING_CTAGS for t in ctags))
         )
 
         parental = (
-            True if d.get("parental") is True else
-            False if d.get("parental") is False else
-            (any(g in PARENTAL_GROUPS for g in groups) or any(t in PARENTAL_CTAGS for t in ctags))
+            True
+            if d.get("parental") is True
+            else False
+            if d.get("parental") is False
+            else (any(g in PARENTAL_GROUPS for g in groups) or any(t in PARENTAL_CTAGS for t in ctags))
         )
 
-        # Blocked services: per-device override or preset union
+        # Blocked services: per-device override or preset union (filter invalid slugs)
         if "blocked_services" in d:
             blocked = [s for s in (d.get("blocked_services") or [])]
+            if valid_slugs:
+                blocked = [s for s in blocked if s in valid_slugs]
             use_global_bs = bool(d.get("use_global_blocked_services", False))
         else:
+            # Presets apply even when groups were inferred from ctags
             wanted = [slug for g in groups for slug in BLOCKED_SERVICES_PRESETS.get(g, [])]
+            if valid_slugs:
+                wanted = [s for s in wanted if s in valid_slugs]
             blocked = sorted(set(wanted))
             use_global_bs = False
 
-        client_payload = {
+        client_payload: dict[str, Any] = {
             "name": final_name,
             "ids": ids,
             "use_global_settings": False,
@@ -346,12 +503,40 @@ async def _plan_clients(api: AdGuardAPI, devices: list[dict[str, Any]], valid_sl
             "use_global_blocked_services": use_global_bs,
             "blocked_services": blocked,
         }
+        # Only set tags if non-empty (avoid wiping on AGH)
         if ctags:
             client_payload["tags"] = ctags
 
-        _LOGGER.info("Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
-                     final_name, ctags, safebrowsing, parental, safesearch, blocked, use_global_bs)
+        _LOGGER.info(
+            "Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
+            final_name,
+            ctags,
+            safebrowsing,
+            parental,
+            safesearch,
+            blocked,
+            use_global_bs,
+        )
 
         plan.append((final_name, client_payload, should_update))
 
     return plan, groups_to_clients
+
+
+def _fmt_client_union(names: List[str]) -> str:
+    quoted = ["'" + n.replace("'", "\\'") + "'" for n in names]
+    return "|".join(quoted)
+
+
+def _generate_dynamic_rules(groups_to_clients: Dict[str, List[str]]) -> str:
+    lines = ["! ---- Dynamically generated $client rules ----"]
+    if "child" in groups_to_clients and groups_to_clients["child"]:
+        union = _fmt_client_union(groups_to_clients["child"])
+        for host in ("doh.cloudflare-dns.com", "dns.google", "dns.quad9.net"):
+            lines.append(f"||{host}^$client={union}")
+    if "media" in groups_to_clients and groups_to_clients["media"]:
+        union = _fmt_client_union(groups_to_clients["media"])
+        for host in ("facebook.com", "instagram.com", "tiktok.com", "discord.com", "reddit.com"):
+            lines.append(f"||{host}^$client={union}")
+    lines.append("! ---- End dynamic rules ----")
+    return "\n".join(lines)
