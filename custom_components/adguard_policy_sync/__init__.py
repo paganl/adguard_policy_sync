@@ -32,6 +32,7 @@ from .const import (
     PARENTAL_GROUPS,
     PARENTAL_CTAGS,
     BLOCKED_SERVICES_PRESETS,
+    KNOWN_CTAGS,
 )
 
 _LOGGER = logging.getLogger(__name__)
