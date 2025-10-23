@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse, urlunparse
 import voluptuous as vol
-from urllib.parse import urlparse
 
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession  # <-- correct import
 
 from .const import (
     DOMAIN,
@@ -22,17 +23,31 @@ def _normalise_base(s: str) -> str:
     if not s:
         return s
     if not s.startswith(("http://", "https://")):
-        s = "http://" + s  # default to http unless the user says https
+        s = "http://" + s  # default to http if user omitted scheme
     return s
 
+def _ensure_port(base: str, default_port: int = 3000) -> str:
+    """If user omitted a port, append :3000."""
+    try:
+        p = urlparse(base)
+        if p.port is not None:
+            return base
+        netloc = p.hostname if p.hostname else p.netloc
+        if not netloc:
+            return base
+        netloc = f"{netloc}:{default_port}"
+        return urlunparse((p.scheme, netloc, p.path or "", p.params, p.query, p.fragment))
+    except Exception:
+        return base
+
 USER_SCHEMA = vol.Schema({
-    vol.Required(CONF_BASE_URL): str,          # e.g. http://10.2.0.3:3000
+    vol.Required(CONF_BASE_URL): str,   # e.g. http://10.2.0.3:3000  (port optional; we default to :3000)
     vol.Optional(CONF_USERNAME, default=""): str,
     vol.Optional(CONF_PASSWORD, default=""): str,
     vol.Optional(CONF_VERIFY_SSL, default=False): bool,
     vol.Optional(CONF_DEVICES_JSON, default="adguard_devices.json"): str,
     vol.Optional(CONF_RULES_TEXT, default=""): str,
-    vol.Optional(CONF_SCAN_RANGE, default=""): str,           # e.g. 10.2.0.0/24
+    vol.Optional(CONF_SCAN_RANGE, default=""): str,      # e.g. 10.2.0.0/24
     vol.Optional(CONF_AUTO_ONBOARD, default=False): bool,
     vol.Optional(CONF_GUEST_GROUP, default="guest"): str,
 })
@@ -43,7 +58,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
-            base = _normalise_base(user_input.get(CONF_BASE_URL, ""))
+            raw = user_input.get(CONF_BASE_URL, "")
+            base = _ensure_port(_normalise_base(raw))
             user = (user_input.get(CONF_USERNAME) or "").strip()
             pwd  = (user_input.get(CONF_PASSWORD) or "").strip()
             verify = bool(user_input.get(CONF_VERIFY_SSL, False))
@@ -54,20 +70,19 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             _LOGGER.info("Config flow: connectivity test to %s (verify_ssl=%s)", base, verify)
             try:
-                session = self.hass.helpers.aiohttp_client.async_get_clientsession()
+                session = async_get_clientsession(self.hass)  # <-- correct usage
                 api = AdGuardAPI(session, base, username=user or None, password=pwd or None, verify_ssl=verify)
                 await api.get_version()
             except Exception as e:
                 _LOGGER.exception("Connectivity test failed during config flow to %s", base)
-                # Heuristic: auth vs connect
                 msg = str(e).lower()
-                if "401" in msg or "unauthorized" in msg or "forbidden" in msg:
+                if any(tok in msg for tok in ("401", "unauthorized", "forbidden")):
                     errors["base"] = "invalid_auth"
                 else:
                     errors["base"] = "cannot_connect"
                 return self.async_show_form(step_id="user", data_schema=USER_SCHEMA, errors=errors)
 
-            # Use the netloc as unique id to prevent dupes
+            # Use netloc as unique id to prevent dupes
             netloc = urlparse(base).netloc or base
             await self.async_set_unique_id(netloc)
             self._abort_if_unique_id_configured()
@@ -85,7 +100,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             return self.async_create_entry(title="AdGuard Policy Sync", data=data)
 
-        # First show
+        # First render
         return self.async_show_form(step_id="user", data_schema=USER_SCHEMA, errors=errors)
 
     @staticmethod
@@ -101,7 +116,7 @@ class OptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        # Show same schema for options (prefilled from current options or data)
+
         data = {**self.entry.data, **(self.entry.options or {})}
         schema = vol.Schema({
             vol.Optional(CONF_DEVICES_JSON, default=data.get(CONF_DEVICES_JSON, "")): str,
