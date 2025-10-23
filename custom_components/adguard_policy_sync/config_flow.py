@@ -12,7 +12,7 @@ from .const import (
     DOMAIN,
     CONF_BASE_URL, CONF_USERNAME, CONF_PASSWORD, CONF_VERIFY_SSL,
     CONF_DEVICES_JSON, CONF_RULES_TEXT,
-    CONF_SCAN_RANGE, CONF_AUTO_ONBOARD, CONF_GUEST_GROUP,
+    CONF_AUTO_ONBOARD, CONF_GUEST_GROUP,
 )
 from .api import AdGuardAPI
 
@@ -47,7 +47,6 @@ USER_SCHEMA = vol.Schema({
     vol.Optional(CONF_VERIFY_SSL, default=False): bool,
     vol.Optional(CONF_DEVICES_JSON, default="adguard_devices.json"): str,
     vol.Optional(CONF_RULES_TEXT, default=""): str,
-    vol.Optional(CONF_SCAN_RANGE, default=""): str,      # e.g. 10.2.0.0/24
     vol.Optional(CONF_AUTO_ONBOARD, default=False): bool,
     vol.Optional(CONF_GUEST_GROUP, default="guest"): str,
 })
@@ -94,7 +93,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_VERIFY_SSL: verify,
                 CONF_DEVICES_JSON: user_input.get(CONF_DEVICES_JSON, ""),
                 CONF_RULES_TEXT: user_input.get(CONF_RULES_TEXT, ""),
-                CONF_SCAN_RANGE: user_input.get(CONF_SCAN_RANGE, ""),
                 CONF_AUTO_ONBOARD: bool(user_input.get(CONF_AUTO_ONBOARD, False)),
                 CONF_GUEST_GROUP: (user_input.get(CONF_GUEST_GROUP) or "guest").strip().lower(),
             }
@@ -121,7 +119,6 @@ class OptionsFlow(config_entries.OptionsFlow):
         schema = vol.Schema({
             vol.Optional(CONF_DEVICES_JSON, default=data.get(CONF_DEVICES_JSON, "")): str,
             vol.Optional(CONF_RULES_TEXT, default=data.get(CONF_RULES_TEXT, "")): str,
-            vol.Optional(CONF_SCAN_RANGE, default=data.get(CONF_SCAN_RANGE, "")): str,
             vol.Optional(CONF_AUTO_ONBOARD, default=data.get(CONF_AUTO_ONBOARD, False)): bool,
             vol.Optional(CONF_GUEST_GROUP, default=data.get(CONF_GUEST_GROUP, "guest")): str,
         })
