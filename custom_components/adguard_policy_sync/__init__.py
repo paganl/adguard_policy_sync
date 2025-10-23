@@ -354,18 +354,17 @@ def _infer_groups_from_ctags(ctags: list[str], allowed_groups: set[str]) -> list
     return out
 
 
-def _ctags_passthrough_unfiltered(d: dict[str, Any]) -> list[str]:
+def _ctags_from_json(d: dict[str, Any]) -> list[str]:
+    """Return only valid AGH ctags from the JSON (drop friendly groups like 'media', 'adult', 'lan')."""
     raw = [str(t).strip().lower() for t in d.get("tags", []) if t]
     out: list[str] = []
     seen: set[str] = set()
     for t in raw:
-        if not t:
-            continue
-        if all(c.isalnum() or c == "_" for c in t):
-            if t not in seen:
-                seen.add(t)
-                out.append(t)
+        if t in KNOWN_CTAGS and t not in seen:
+            seen.add(t)
+            out.append(t)
     return out
+
 
 
 def _map_groups_to_ctags(groups: list[str]) -> list[str]:
@@ -411,7 +410,7 @@ async def _plan_clients(
     for d in devices:
         desired_name = d.get("name") or "unnamed"
         explicit_groups = _groups_for_device(d, allowed_groups)
-        passthrough_ctags = _ctags_passthrough_unfiltered(d)
+        passthrough_ctags = _ctags_from_json(d)
         mapped_ctags = _map_groups_to_ctags(explicit_groups)
         ctags = list(dict.fromkeys(passthrough_ctags + mapped_ctags))
 
