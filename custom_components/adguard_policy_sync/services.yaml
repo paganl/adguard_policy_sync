@@ -1,34 +1,34 @@
 sync:
   name: Sync policy to AdGuard Home
-  description: Generates and applies custom rules, then syncs clients from a devices JSON.
+  description: "Generates and applies custom rules, then syncs clients from a devices JSON."
   fields:
     devices_json:
-      name: Devices JSON path (optional)
-      description: Path to devices JSON. If omitted, uses the path from the config entry.
+      name: "Devices JSON path (optional)"
+      description: "Path to devices JSON. If omitted, uses the path from the config entry."
       example: adguard_devices.json
       required: false
       selector:
-        text:
+        text: {}
     rules_text:
-      name: Custom rules (optional)
-      description: If provided, replaces the current custom rules (dynamic rules may still be appended if enabled).
+      name: "Custom rules (optional)"
+      description: "If provided, replaces the current custom rules (dynamic rules may still be appended if enabled)."
       required: false
       selector:
-        text:
+        text: {}
 
 pause:
   name: Pause protection for clients
-  description: Temporarily disables protection for selected clients and automatically restores it.
+  description: "Temporarily disables protection for selected clients and automatically restores it."
   fields:
     clients:
-      name: Client names
-      description: Exact Client names as shown in AdGuard Home.
+      name: "Client names"
+      description: "Exact client names as shown in AdGuard Home."
       required: true
       selector:
-        text:
+        text: {}
     minutes:
       name: Minutes
-      description: Duration of the pause (default 15).
+      description: "Duration of the pause (default 15)."
       required: false
       selector:
         number:
@@ -38,7 +38,7 @@ pause:
           unit_of_measurement: minutes
     scope:
       name: Scope
-      description: 'filtering_only' disables only filtering rules; 'all' also disables SafeBrowsing, Parental, and blocked services.
+      description: "Use 'filtering_only' to disable only filtering rules; use 'all' to also disable Browsing Security, Parental, and clear blocked services."
       required: false
       selector:
         select:
