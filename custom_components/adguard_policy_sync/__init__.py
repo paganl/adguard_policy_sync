@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import timedelta
 from typing import Any, Dict, List, Tuple
 
@@ -38,6 +39,8 @@ from .const import (
     BLOCKED_SERVICES_PRESETS,
     KNOWN_CTAGS,
 )
+
+DHCP_TTL = 90
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[str] = []
