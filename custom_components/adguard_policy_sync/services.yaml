@@ -1,49 +1,77 @@
 sync:
   name: Sync policy to AdGuard Home
-  description: "Applies custom rules and syncs clients from JSON. Can scan the LAN and auto-onboard unknowns."
+  description: "Apply custom rules and sync clients from JSON. Optionally auto-onboard unknown devices from DHCP."
   fields:
     devices_json:
-      name: "Devices JSON (optional)"
-      description: "Path under /config, e.g. adguard_devices.json. Uses entry default if omitted."
+      name: Devices JSON (optional)
+      description: "Path under /config, e.g. adguard_devices.json. Uses the configured default if omitted."
       required: false
-      selector: { text: {} }
+      selector:
+        text: {}
     rules_text:
-      name: "Custom rules (optional)"
+      name: Custom rules (optional)
       description: "If provided, replaces current custom rules; dynamic rules may still be appended."
       required: false
-      selector: { text: {} }
-    scan_range:
-      name: "Scan range (optional)"
-      description: "CIDR to discover live devices with nmap, e.g. 10.2.0.0/24."
-      required: false
-      selector: { text: {} }
+      selector:
+        text:
+          multiline: true
     auto_onboard_unknowns:
-      name: "Auto-onboard unknowns"
-      description: "If on, live devices not in JSON are created as Guest persistent clients."
+      name: Auto-onboard unknowns
+      description: "If on, devices seen in DHCP but not in JSON are created as Guest persistent clients."
       required: false
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
     guest_group:
-      name: "Guest group name"
+      name: Guest group name
       description: "Friendly group to use for presets for unknowns (default 'guest')."
       required: false
-      selector: { text: {} }
+      selector:
+        text: {}
 
 discover:
-  name: Discover live devices (nmap) and optionally onboard as Guests
-  description: "Runs nmap -sn, learns IP⇄MAC, emits events and can create Guest clients."
+  name: Discover devices from DHCP and optionally onboard as Guests
+  description: "Reads AdGuard Home DHCP leases, updates existing clients to include MAC+IP, and can create Guest clients for unknowns."
   fields:
-    scan_range:
-      name: "Scan range"
-      description: "CIDR to scan, e.g. 10.2.0.0/24."
-      required: true
-      selector: { text: {} }
     guest_group:
-      name: "Guest group name"
+      name: Guest group name
       description: "Friendly group for presets when onboarding (default 'guest')."
       required: false
-      selector: { text: {} }
+      selector:
+        text: {}
     create_clients:
-      name: "Create Guest clients"
-      description: "If false, just emits events; if true, also adds persistent Guest clients."
+      name: Create Guest clients
+      description: "If false, just emits discovery events; if true, also adds persistent Guest clients."
       required: false
-      selector: { boolean: {} }
+      selector:
+        boolean: {}
+
+pause:
+  name: Pause filtering for specific clients
+  description: "Temporarily pause filtering (and optionally Safe Browsing/Parental/blocked services) for selected clients, then auto-restore."
+  fields:
+    minutes:
+      name: Minutes
+      description: "Duration to pause (default 15)."
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 240
+          step: 1
+          mode: box
+    scope:
+      name: Scope
+      description: "'filtering_only' disables filtering; 'all' also disables Safe Browsing, Parental and blocked services."
+      required: false
+      selector:
+        select:
+          options:
+            - filtering_only
+            - all
+          mode: dropdown
+    clients:
+      name: Clients
+      description: "YAML list of client names to pause (e.g. ['Apple iPhone 14','Dell Latitude Laptop'])."
+      required: true
+      selector:
+        object: {}
