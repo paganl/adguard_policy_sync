@@ -208,20 +208,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("Could not load blocked services catalog: %s", e)
         valid_slugs = set()
 
-    hass.data[DOMAIN][entry.entry_id] = {
-        "api": api,
-        "devices_json": devices_json,
-        "rules_text": rules_text,
-        "valid_service_slugs": valid_slugs,
-        "allowed_groups": allowed_groups,
-        "append_dynamic_rules": append_dyn,
-        "default_scan_range": default_scan_range,   # legacy; ignored for scanning
-        "default_auto_onboard": default_auto_on,
-        "default_guest_group": default_guest_grp,
-        "_pause_state": {},
-        "_dhcp_cache": {},  # mac->ip cache with ts
-        "allow_rename": allow_rename,
-    }
+    hass.data[DOMAIN][entry.entry_id] = dict(
+        api=api,
+        devices_json=devices_json,
+        rules_text=rules_text,
+        valid_service_slugs=valid_slugs,
+        allowed_groups=allowed_groups,
+        append_dynamic_rules=append_dyn,
+        default_scan_range=default_scan_range,   # legacy; ignored
+        default_auto_onboard=default_auto_on,
+        default_guest_group=default_guest_grp,
+        _pause_state={},
+        _dhcp_cache={},           # mac->ip cache
+        _blocked_runtime=set(),   # <— add this
+        allow_rename=allow_rename,
+    )
 
     # --------------------------
     # DHCP helper (cached)
@@ -452,15 +453,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return None
 
         # Dynamic rules
+        runtime_blocked = list(hass.data[DOMAIN][entry.entry_id].get("_blocked_runtime", set()))
         rules_text = rules_text_base
-        if append_dynamic and groups_to_clients:
-            dyn = _generate_dynamic_rules(groups_to_clients)
+        if append_dynamic and (groups_to_clients or runtime_blocked):
+            dyn = _generate_dynamic_rules(groups_to_clients, runtime_blocked)
             rules_text = rules_text.rstrip() + "\n\n" + dyn + "\n"
-
+        
         try:
             await api.set_custom_rules(rules_text)
         except Exception as e:
             _LOGGER.error("Failed to set custom rules: %s", e)
+            
         # Apply plan
         for final_name, client_payload, should_update in plan:
             # Ensure MAC + IP in ids
@@ -787,11 +790,19 @@ def _fmt_client_union(names: List[str]) -> str:
     return "|".join(quoted)
 
 
-def _generate_dynamic_rules(groups_to_clients: Dict[str, List[str]]) -> str:
+def _generate_dynamic_rules(
+    groups_to_clients: Dict[str, List[str]],
+    runtime_blocked: List[str] | None = None,
+) -> str:
     lines = ["! ---- Dynamically generated $client rules ----"]
     if "blocked" in groups_to_clients and groups_to_clients["blocked"]:
         union = _fmt_client_union(groups_to_clients["blocked"])
         # Optional: keep time/captive checks working. Adjust to taste or remove entirely.
+        denyallow = "pool.ntp.org|time.google.com|connectivitycheck.gstatic.com|time.windows.com|time.apple.com"
+        lines.append(f"/.*/$client={union},denyallow={denyallow}")
+    
+    if runtime_blocked:
+        union = _fmt_client_union(runtime_blocked)
         denyallow = "pool.ntp.org|time.google.com|connectivitycheck.gstatic.com|time.windows.com|time.apple.com"
         lines.append(f"/.*/$client={union},denyallow={denyallow}")
     
