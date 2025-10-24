@@ -789,6 +789,12 @@ def _fmt_client_union(names: List[str]) -> str:
 
 def _generate_dynamic_rules(groups_to_clients: Dict[str, List[str]]) -> str:
     lines = ["! ---- Dynamically generated $client rules ----"]
+    if "blocked" in groups_to_clients and groups_to_clients["blocked"]:
+        union = _fmt_client_union(groups_to_clients["blocked"])
+        # Optional: keep time/captive checks working. Adjust to taste or remove entirely.
+        denyallow = "pool.ntp.org|time.google.com|connectivitycheck.gstatic.com|time.windows.com|time.apple.com"
+        lines.append(f"/.*/$client={union},denyallow={denyallow}")
+    
     if "child" in groups_to_clients and groups_to_clients["child"]:
         union = _fmt_client_union(groups_to_clients["child"])
         for host in ("doh.cloudflare-dns.com", "dns.google", "dns.quad9.net"):
