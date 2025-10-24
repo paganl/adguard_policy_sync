@@ -22,7 +22,7 @@ CTAG_MAPPING = {
     "media": ["device_tv"],
     "iot":   ["device_other"],
     "guest": ["user_child","device_other"],
-    "blocked": [],
+    "blocked": [],                                 # do not send any ctags to AGH
     "other": ["device_other"],
 }
 
