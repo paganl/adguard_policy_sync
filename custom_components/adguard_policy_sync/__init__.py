@@ -36,6 +36,7 @@ from .const import (
     PARENTAL_GROUPS, PARENTAL_CTAGS,
     BLOCKED_SERVICES_PRESETS,
     KNOWN_CTAGS,
+    CONF_ALLOW_RENAME,
 )
 
 DHCP_TTL = 90  # seconds to reuse DHCP cache
@@ -183,7 +184,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     default_scan_range = (entry.data.get(CONF_SCAN_RANGE) or "").strip()  # unused now; kept for options
     default_auto_on = bool(entry.data.get(CONF_AUTO_ONBOARD, False))
     default_guest_grp = (entry.data.get(CONF_GUEST_GROUP) or "guest").strip().lower()
-
+    allow_rename = bool(entry.data.get(CONF_ALLOW_RENAME, False))
+    
     api = AdGuardAPI(
         session,
         base_url,
@@ -218,6 +220,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         default_guest_group=default_guest_grp,
         _pause_state={},
         _dhcp_cache={},  # mac->ip cache with ts
+        "allow_rename": allow_rename,
     )
 
     # --------------------------
@@ -372,6 +375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         valid_slugs: set[str] = data.get("valid_service_slugs", set())
         allowed_groups: set[str] = data.get("allowed_groups", set(DEFAULT_ALLOWED_GROUPS))
         append_dynamic: bool = data.get("append_dynamic_rules", True)
+        allow_rename: bool = data.get("allow_rename", False)
 
         json_path = call.data.get("devices_json") or data.get("devices_json")
         rules_text_base = call.data.get("rules_text") or data.get("rules_text") or DEFAULT_RULES
@@ -477,7 +481,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     target_name = existing_for_ids
                     action_update = True
                     client_payload["name"] = existing_for_ids
-
+                    
+            # ------- Rename-by-recreate (opt-in) -------
+            desired_name = client_payload.get("name", final_name)
+            allow_rename: bool = data.get("allow_rename", False)  # set this in async_setup_entry or hard-code True to test
+            if action_update and allow_rename and desired_name != target_name:
+                _LOGGER.info("Renaming client '%s' → '%s' by recreate", target_name, desired_name)
+                try:
+                    await api.clients_delete(target_name)  # needs AdGuardAPI.clients_delete()
+                except Exception as e:
+                    _LOGGER.error("Rename: delete '%s' failed: %s", target_name, e)
+                else:
+                    payload_new = dict(client_payload)
+                    payload_new["name"] = desired_name
+                    try:
+                        await api.clients_add(payload_new)
+                        for i in payload_new.get("ids", []):
+                            if isinstance(i, str):
+                                id_to_name[i] = desired_name
+                        continue  # finished this client
+                    except Exception as e:
+                        _LOGGER.error(
+                            "Rename: add '%s' failed after delete: %s — falling back to update without rename",
+                            desired_name, e
+                )
+                        
             try:
                 if action_update:
                     await api.clients_update(target_name, client_payload)
