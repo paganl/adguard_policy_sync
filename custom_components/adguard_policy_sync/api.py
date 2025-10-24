@@ -36,6 +36,10 @@ class AdGuardAPI:
     async def dhcp_status(self) -> dict:
         """Return DHCP status (leases + static leases)."""
         return await self._req("GET", "/control/dhcp/status")
+    # add to AdGuardAPI class
+    
+    async def clients_delete(self, name: str) -> Any:
+        return await self._req("POST", "/control/clients/delete", {"name": name})
 
     async def _req(self, method: str, path: str, json_body: Any=None) -> Any:
         url = _join(self._base, path)
