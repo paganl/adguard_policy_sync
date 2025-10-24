@@ -75,3 +75,30 @@ pause:
       required: true
       selector:
         object: {}
+
+block:
+  name: Block clients (runtime)
+  description: "Adds clients to a deny-all rule via $client=… dynamic rules."
+  fields:
+    clients:
+      name: Clients
+      description: "List of client names (exactly as in AdGuard Home)."
+      required: true
+      example: '["Apple iPhone 14","MacBook Pro"]'
+      selector: { object: {} }
+    minutes:
+      name: Minutes
+      description: "Optional duration; if omitted, block until manually unblocked."
+      required: false
+      selector: { number: { min: 1, step: 1 } }
+
+unblock:
+  name: Unblock clients (runtime)
+  description: "Removes clients from the runtime deny-all rule and refreshes rules."
+  fields:
+    clients:
+      name: Clients
+      description: "List of client names."
+      required: true
+      example: '["Apple iPhone 14"]'
+      selector: { object: {} }
