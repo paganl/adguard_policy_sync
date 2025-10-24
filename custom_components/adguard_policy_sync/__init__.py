@@ -208,20 +208,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("Could not load blocked services catalog: %s", e)
         valid_slugs = set()
 
-    hass.data[DOMAIN][entry.entry_id] = dict(
-        api=api,
-        devices_json=devices_json,
-        rules_text=rules_text,
-        valid_service_slugs=valid_slugs,
-        allowed_groups=allowed_groups,
-        append_dynamic_rules=append_dyn,
-        default_scan_range=default_scan_range,   # legacy; ignored for scanning
-        default_auto_onboard=default_auto_on,
-        default_guest_group=default_guest_grp,
-        _pause_state={},
-        _dhcp_cache={},  # mac->ip cache with ts
+    hass.data[DOMAIN][entry.entry_id] = {
+        "api": api,
+        "devices_json": devices_json,
+        "rules_text": rules_text,
+        "valid_service_slugs": valid_slugs,
+        "allowed_groups": allowed_groups,
+        "append_dynamic_rules": append_dyn,
+        "default_scan_range": default_scan_range,   # legacy; ignored for scanning
+        "default_auto_onboard": default_auto_on,
+        "default_guest_group": default_guest_grp,
+        "_pause_state": {},
+        "_dhcp_cache": {},  # mac->ip cache with ts
         "allow_rename": allow_rename,
-    )
+    }
 
     # --------------------------
     # DHCP helper (cached)
