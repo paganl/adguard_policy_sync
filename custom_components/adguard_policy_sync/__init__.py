@@ -184,7 +184,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     default_scan_range = (entry.data.get(CONF_SCAN_RANGE) or "").strip()  # unused now; kept for options
     default_auto_on = bool(entry.data.get(CONF_AUTO_ONBOARD, False))
     default_guest_grp = (entry.data.get(CONF_GUEST_GROUP) or "guest").strip().lower()
-    allow_rename = bool(entry.data.get(CONF_ALLOW_RENAME, False))
+    allow_rename = bool(entry.data.get(CONF_ALLOW_RENAME, True))
     
     api = AdGuardAPI(
         session,
