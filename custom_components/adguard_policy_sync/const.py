@@ -11,6 +11,8 @@ CONF_APPEND_DYNAMIC_RULES = "append_dynamic_rules"
 CONF_SCAN_RANGE = "scan_range"                     # e.g. "10.2.0.0/24"
 CONF_AUTO_ONBOARD = "auto_onboard_unknowns"        # bool
 CONF_GUEST_GROUP = "guest_group"                   # friendly group to use for unknowns (default "guest")
+CONF_ALLOW_RENAME = "allow_rename"
+DEFAULT_ALLOW_RENAME = False
 
 DEFAULT_ALLOWED_GROUPS = {"iot","media","child","adult","guest"}
 
