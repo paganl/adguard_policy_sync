@@ -262,6 +262,83 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # --------------------------
     # Services
     # --------------------------
+    async def _service_block(call: ServiceCall) -> None:
+        """Runtime-block one or more clients by name (optional timed)."""
+        store = hass.data[DOMAIN][entry.entry_id]
+        api: AdGuardAPI = store["api"]
+    
+        # Accept list or single string
+        raw = call.data.get("clients")
+        if isinstance(raw, str):
+            requested = [raw]
+        else:
+            requested = list(raw or [])
+        requested = [str(n).strip() for n in requested if str(n).strip()]
+    
+        if not requested:
+            _LOGGER.error("block: 'clients' is required (list of names)")
+            return
+    
+        # Validate names against current persistent clients (avoid typos)
+        try:
+            status = await api.clients_status()
+            existing = status.get("clients", []) if isinstance(status, dict) else (status if isinstance(status, list) else [])
+        except Exception:
+            existing = []
+        known = {c.get("name") for c in existing if isinstance(c, dict) and c.get("name")}
+        to_block = [n for n in requested if n in known]
+        unknown = [n for n in requested if n not in known]
+        if unknown:
+            _LOGGER.warning("block: unknown client names (ignored): %s", unknown)
+        if not to_block:
+            return
+    
+        # Update runtime set
+        rt = store.setdefault("_blocked_runtime", set())
+        for n in to_block:
+            rt.add(n)
+    
+        # Optional timed unblock
+        minutes = call.data.get("minutes")
+        if isinstance(minutes, (int, float)) and minutes > 0:
+            async def _auto_unblock(now):
+                for n in to_block:
+                    rt.discard(n)
+                # Re-emit rules (cheap way: full sync so cohorts are preserved)
+                await hass.services.async_call(DOMAIN, "sync", {}, blocking=False)
+            ha_event.async_call_later(hass, timedelta(minutes=int(minutes)), _auto_unblock)
+    
+        # Re-emit rules (cheap: call sync so we also keep cohort rules intact)
+        await hass.services.async_call(DOMAIN, "sync", {}, blocking=False)
+        _LOGGER.info("block: runtime-blocked %s%s",
+                     to_block, f" for {int(minutes)} min" if minutes else "")
+    
+    async def _service_unblock(call: ServiceCall) -> None:
+        """Remove clients from the runtime blocklist and refresh rules."""
+        store = hass.data[DOMAIN][entry.entry_id]
+        api: AdGuardAPI = store["api"]
+    
+        raw = call.data.get("clients")
+        if isinstance(raw, str):
+            requested = [raw]
+        else:
+            requested = list(raw or [])
+        requested = [str(n).strip() for n in requested if str(n).strip()]
+    
+        if not requested:
+            _LOGGER.error("unblock: 'clients' is required (list of names)")
+            return
+    
+        rt = store.setdefault("_blocked_runtime", set())
+        removed = [n for n in requested if n in rt]
+        for n in removed:
+            rt.discard(n)
+    
+        if removed:
+            await hass.services.async_call(DOMAIN, "sync", {}, blocking=False)
+            _LOGGER.info("unblock: runtime-unblocked %s", removed)
+        else:
+            _LOGGER.info("unblock: nothing to do (none were blocked): %s", requested)
 
     async def _service_discover(call: ServiceCall) -> None:
         """
@@ -651,6 +728,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "discover", _service_discover)
     hass.services.async_register(DOMAIN, "sync", _service_sync)
     hass.services.async_register(DOMAIN, "pause", _service_pause)
+    hass.services.async_register(DOMAIN, "block", _service_block)
+    hass.services.async_register(DOMAIN, "unblock", _service_unblock)
 
     if devices_json:
         hass.async_create_task(hass.services.async_call(DOMAIN, "sync", {}, blocking=False))
