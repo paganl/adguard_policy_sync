@@ -14,14 +14,16 @@ CONF_GUEST_GROUP = "guest_group"                   # friendly group to use for u
 CONF_ALLOW_RENAME = "allow_rename"
 DEFAULT_ALLOW_RENAME = False
 
-DEFAULT_ALLOWED_GROUPS = {"iot","media","child","adult","guest"}
+DEFAULT_ALLOWED_GROUPS = {"iot","media","child","adult","guest","other","blocked"}
 
 CTAG_MAPPING = {
     "child": ["user_child"],
     "adult": ["user_admin"],
     "media": ["device_tv"],
     "iot":   ["device_other"],
-    "guest": ["user_regular"],
+    "guest": ["user_child","device_other"],
+    "blocked": [],
+    "other": ["device_other"],
 }
 
 SAFESEARCH_GROUPS = {"child","guest"}
