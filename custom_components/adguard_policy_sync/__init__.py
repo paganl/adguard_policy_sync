@@ -458,7 +458,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await api.set_custom_rules(rules_text)
         except Exception as e:
             _LOGGER.error("Failed to set custom rules: %s", e)
-
         # Apply plan
         for final_name, client_payload, should_update in plan:
             # Ensure MAC + IP in ids
@@ -471,8 +470,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if live and live not in ids:
                     ids.append(live)
             client_payload["ids"] = ids
-
-            # Decide add/update and recover duplicate adds
+        
+            # Decide add vs update
             target_name = final_name
             action_update = bool(should_update)
             if not action_update:
@@ -480,101 +479,104 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if existing_for_ids:
                     target_name = existing_for_ids
                     action_update = True
-                    client_payload["name"] = existing_for_ids
-                    
+        
+            # JSON source-of-truth name (carried from _plan_clients)
+            desired_name = client_payload.pop("_desired_name", final_name)
+        
             # ------- Rename-by-recreate (opt-in) -------
-            desired_name = client_payload.get("name", final_name)
-            allow_rename: bool = data.get("allow_rename", False)  # set this in async_setup_entry or hard-code True to test
             if action_update and allow_rename and desired_name != target_name:
-                _LOGGER.info("Renaming client '%s' → '%s' by recreate", target_name, desired_name)
+                _LOGGER.info("Renaming client '%s' → '%s' by recreate (ids=%s)", target_name, desired_name, ids)
+        
+                # Optional: pre-clear any stale record with desired_name
                 try:
-                    await api.clients_delete(target_name)  # needs AdGuardAPI.clients_delete()
+                    await api.clients_delete(desired_name)
+                except Exception:
+                    pass
+        
+                # Delete the old record
+                try:
+                    await api.clients_delete(target_name)
+                    _LOGGER.debug("Rename: deleted old '%s'", target_name)
                 except Exception as e:
-                    _LOGGER.error("Rename: delete '%s' failed: %s", target_name, e)
-                else:
-                    payload_new = dict(client_payload)
-                    payload_new["name"] = desired_name
-                    try:
-                        await api.clients_add(payload_new)
-                        for i in payload_new.get("ids", []):
-                            if isinstance(i, str):
-                                id_to_name[i] = desired_name
-                        continue  # finished this client
-                    except Exception as e:
-                        _LOGGER.error(
-                            "Rename: add '%s' failed after delete: %s — falling back to update without rename",
-                            desired_name, e
-                )
-                        
+                    _LOGGER.warning("Rename: delete old '%s' failed, continuing: %s", target_name, e)
+        
+                # Re-add with desired JSON name
+                payload_new = dict(client_payload)
+                payload_new["name"] = desired_name
+                try:
+                    await api.clients_add(payload_new)
+                    for i in payload_new.get("ids", []):
+                        if isinstance(i, str):
+                            id_to_name[i] = desired_name
+                    _LOGGER.info("Rename complete: '%s' → '%s'", target_name, desired_name)
+                    continue  # handled; next client
+                except ClientResponseError as cre:
+                    # If a different client still owns these IDs, purge and retry once
+                    m = re.search(r'another client "([^"]+)" uses the same', str(cre))
+                    if m:
+                        other = m.group(1)
+                        try:
+                            await api.clients_delete(other)
+                            await api.clients_add(payload_new)
+                            for i in payload_new.get("ids", []):
+                                if isinstance(i, str):
+                                    id_to_name[i] = desired_name
+                            _LOGGER.info("Rename complete after purging '%s': '%s' → '%s'", other, target_name, desired_name)
+                            continue
+                        except Exception as e2:
+                            _LOGGER.error("Rename purge retry failed for '%s': %s", desired_name, e2)
+                    _LOGGER.error("Rename: add '%s' failed: %s; updating old name instead", desired_name, cre)
+                except Exception as e:
+                    _LOGGER.error("Rename: add '%s' failed: %s; updating old name instead", desired_name, e)
+        
+            # ------- Normal add/update path -------
+            client_payload["name"] = target_name
             try:
                 if action_update:
                     await api.clients_update(target_name, client_payload)
                 else:
                     await api.clients_add(client_payload)
-                # success: learn ids→name for later items
+        
+                # Learn ids→name for later items
+                final_applied_name = target_name if action_update else client_payload["name"]
                 for i in ids:
-                    id_to_name[i] = target_name
-
+                    if isinstance(i, str):
+                        id_to_name[i] = final_applied_name
+        
             except ClientResponseError as cre:
-                msg = f"{cre}"
-                m = re.search(r'another client "([^"]+)" uses the same', msg)
-                if not action_update and m:
-                    existing_for_ids = m.group(1)
-                    client_payload["name"] = existing_for_ids
-                    try:
-                        await api.clients_update(existing_for_ids, client_payload)
-                        for i in ids:
-                            id_to_name[i] = existing_for_ids
-                        continue
-                    except Exception as e2:
-                        _LOGGER.error(
-                            "Retry as update failed for %s → %s: %s | Payload=%s",
-                            final_name,
-                            existing_for_ids,
-                            e2,
-                            {
-                                k: client_payload.get(k)
-                                for k in (
-                                    "name",
-                                    "ids",
-                                    "tags",
-                                    "blocked_services",
-                                    "use_global_blocked_services",
-                                )
-                            },
-                        )
-                        continue
-
+                # Duplicate on add → retry as update against server-reported owner
+                if not action_update:
+                    m = re.search(r'another client "([^"]+)" uses the same', str(cre))
+                    if m:
+                        owner = m.group(1)
+                        client_payload["name"] = owner
+                        try:
+                            await api.clients_update(owner, client_payload)
+                            for i in ids:
+                                if isinstance(i, str):
+                                    id_to_name[i] = owner
+                            continue
+                        except Exception as e2:
+                            _LOGGER.error(
+                                "Retry as update failed for %s → %s: %s | Payload=%s",
+                                final_name, owner, e2,
+                                {k: client_payload.get(k) for k in ("name","ids","tags","blocked_services","use_global_blocked_services")}
+                            )
+                            continue
                 _LOGGER.error(
                     "Client push failed for %s: %s | Payload=%s",
-                    final_name,
-                    cre,
-                    {
-                        k: client_payload.get(k)
-                        for k in (
-                            "name",
-                            "ids",
-                            "tags",
-                            "use_global_settings",
-                            "blocked_services",
-                            "use_global_blocked_services",
-                            "safesearch_enabled",
-                            "safebrowsing_enabled",
-                            "parental_enabled",
-                        )
-                    },
+                    final_name, cre,
+                    {k: client_payload.get(k) for k in ("name","ids","tags","use_global_settings",
+                                                        "blocked_services","use_global_blocked_services",
+                                                        "safesearch_enabled","safebrowsing_enabled","parental_enabled")}
                 )
                 continue
-
+        
             except Exception as e:
                 _LOGGER.error(
                     "Client push failed for %s: %s | Payload=%s",
-                    final_name,
-                    e,
-                    {
-                        k: client_payload.get(k)
-                        for k in ("name", "ids", "tags", "use_global_blocked_services", "blocked_services")
-                    },
+                    final_name, e,
+                    {k: client_payload.get(k) for k in ("name","ids","tags","use_global_blocked_services","blocked_services")}
                 )
                 continue
 
@@ -759,7 +761,8 @@ async def _plan_clients(
         }
         if ctags:
             client_payload["tags"] = ctags
-
+        client_payload["_desired_name"] = desired_name
+        
         _LOGGER.info(
             "Plan '%s': tags=%s, safebrowsing=%s, parental=%s, safesearch=%s, blocked=%s (global_bs=%s)",
             final_name,
