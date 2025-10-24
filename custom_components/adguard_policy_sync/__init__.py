@@ -270,6 +270,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         data = hass.data[DOMAIN][entry.entry_id]
         valid_slugs: set[str] = data.get("valid_service_slugs", set())
+        
+        guest_tags_try = ["user_child", "device_other"]
 
         guest_group = (call.data.get("guest_group") or data.get("default_guest_group") or "guest").strip().lower()
         create_clients = bool(call.data.get("create_clients", True))
@@ -338,37 +340,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "filtering_enabled": True,
                 "safebrowsing_enabled": True,
                 "safesearch_enabled": True,
-                "parental_enabled": False,
+                "parental_enabled": True,
                 "use_global_blocked_services": False,
                 "blocked_services": guest_block,
-                "tags": ["user_regular"],  # valid AGH ctag
+                "tags": guest_tags_try,  # valid AGH ctag
             }
 
             try:
                 await api.clients_add(payload)
                 created += 1
                 hass.bus.async_fire(f"{DOMAIN}.guest_onboarded", {"name": name, "ip": ip, "mac": mac})
-                _LOGGER.info("discover: onboarded Guest '%s' ids=[%s, %s]", name, mac_disp, ip)
+                _LOGGER.info("discover: onboarded Guest '%s' ids=[%s, %s] (ctags=%s)", name, mac_disp, ip, guest_tags_try)
             except ClientResponseError as cre:
-                # duplicate MAC → recover as update
-                m = re.search(r'another client "([^"]+)" uses the same', str(cre))
-                if m:
-                    exist_name = m.group(1)
-                    try:
+                # If AGH rejects a tag for any reason, retry with device_only
+                if "invalid tag" in str(cre).lower():
+                    payload["tags"] = ["device_other"]
+                    _LOGGER.warning("AGH rejected a guest ctag; retrying Guest '%s' with device_other only", name)
+                    await api.clients_add(payload)
+                    created += 1
+                    hass.bus.async_fire(f"{DOMAIN}.guest_onboarded", {"name": name, "ip": ip, "mac": mac})
+                    _LOGGER.info("discover: onboarded Guest '%s' ids=[%s, %s] (ctag=device_other)", name, mac_disp, ip)
+                else:
+                    # …keep your duplicate-MAC recovery path here…
+                    m = re.search(r'another client "([^"]+)" uses the same', str(cre))
+                    if m:
+                        exist_name = m.group(1)
                         await api.clients_update(exist_name, {"ids": list(dict.fromkeys([mac, ip]))})
                         updated += 1
                         hass.bus.async_fire(f"{DOMAIN}.guest_identifiers_updated", {"name": exist_name, "ip": ip, "mac": mac})
                         _LOGGER.info("discover: recovered by updating '%s' ids=[%s, %s]", exist_name, mac_disp, ip)
-                        continue
-                    except Exception as e2:
-                        _LOGGER.error("discover: recovery update failed for '%s': %s", exist_name, e2)
-                        continue
-                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac_disp, cre)
-            except Exception as e:
-                _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac_disp, e)
-
-        _LOGGER.info("discover: created %d and updated %d clients (DHCP pairs=%d)", created, updated, len(pairs))
-
+                    else:
+                        _LOGGER.error("discover: add failed for %s/%s: %s", ip, mac_disp, cre)
+            
     async def _service_sync(call: ServiceCall) -> None:
         data = hass.data[DOMAIN][entry.entry_id]
         api: AdGuardAPI = data["api"]
