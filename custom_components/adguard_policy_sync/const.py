@@ -69,6 +69,8 @@ DEFAULT_RULES = """
 ||discord.com^$ctag=user_regular
 ||reddit.com^$ctag=user_regular
 @@||prod.zpath.net^$client='ABN AMRO Dell Laptop'
+@@||frontdoor.nest.com^$client='Nest Protect 1'
+@@||solaredge.com^$client='Inverta'
 
 *$ctag=device_other,denyallow=pool.ntp.org|time.google.com|connectivitycheck.gstatic.com|time.windows.com|time.apple.com
 """
